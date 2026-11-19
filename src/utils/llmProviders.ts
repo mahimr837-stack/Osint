@@ -1,0 +1,488 @@
+import type { ParsedInlineImage } from './osintGraph';
+
+export type LlmProviderId =
+  | 'anthropic'
+  | 'openai'
+  | 'openrouter'
+  | 'google'
+  | 'deepseek'
+  | 'mistral';
+
+export interface LlmProviderMeta {
+  id: LlmProviderId;
+  name: string;
+  envVarName: string;
+  endpointLabel: string;
+  endpointUrl: string | null;
+  consoleUrl: string;
+  defaultModel: string;
+  models: readonly string[];
+  keyPlaceholder: string;
+  supportsVision: boolean;
+  description: string;
+}
+
+export const LLM_PROVIDERS: readonly LlmProviderMeta[] = [
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    envVarName: 'ANTHROPIC_API_KEY',
+    endpointLabel: '/api/llm/generate (api.anthropic.com)',
+    endpointUrl: 'https://api.anthropic.com/v1/messages',
+    consoleUrl: 'https://console.anthropic.com/settings/keys',
+    defaultModel: 'claude-3-5-sonnet-latest',
+    models: [
+      'claude-3-5-sonnet-latest',
+      'claude-3-7-sonnet-latest',
+      'claude-3-5-haiku-latest',
+      'claude-3-opus-latest',
+    ],
+    keyPlaceholder: 'ANTHROPIC_API_KEY (Server Secret)',
+    supportsVision: true,
+    description: 'Server-proxied Anthropic Messages API with multimodal vision inspection.',
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    envVarName: 'OPENAI_API_KEY',
+    endpointLabel: '/api/llm/generate (api.openai.com)',
+    endpointUrl: 'https://api.openai.com/v1/chat/completions',
+    consoleUrl: 'https://platform.openai.com/api-keys',
+    defaultModel: 'gpt-4o',
+    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'o4-mini'],
+    keyPlaceholder: 'OPENAI_API_KEY (Server Secret)',
+    supportsVision: true,
+    description: 'Server-proxied OpenAI Chat Completions API with multimodal image understanding.',
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    envVarName: 'OPENROUTER_API_KEY',
+    endpointLabel: '/api/llm/generate (openrouter.ai)',
+    endpointUrl: 'https://openrouter.ai/api/v1/chat/completions',
+    consoleUrl: 'https://openrouter.ai/keys',
+    defaultModel: 'anthropic/claude-3.5-sonnet',
+    models: [
+      'anthropic/claude-3.5-sonnet',
+      'openai/gpt-4o',
+      'google/gemini-2.5-flash',
+      'deepseek/deepseek-chat',
+    ],
+    keyPlaceholder: 'OPENROUTER_API_KEY (Server Secret)',
+    supportsVision: true,
+    description:
+      'Server-proxied OpenAI-compatible multi-model router supporting Claude, GPT-4o, Gemini, and DeepSeek.',
+  },
+  {
+    id: 'google',
+    name: 'Google',
+    envVarName: 'GEMINI_API_KEY',
+    endpointLabel: '/api/llm/generate (Gemini SDK)',
+    endpointUrl: '/api/gemini/generate',
+    consoleUrl: 'https://aistudio.google.com/apikey',
+    defaultModel: 'gemini-4-hydrogen',
+    models: [
+      'gemini-4-hydrogen',
+      'gemini-4-argon',
+      'gemini-3.1-flash-lite',
+      'gemini-2.5-flash',
+      'gemini-2.5-pro',
+    ],
+    keyPlaceholder: 'GEMINI_API_KEY (Server Secret)',
+    supportsVision: true,
+    description: 'Server-side Google GenAI SDK for multimodal Gemini inspection.',
+  },
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    envVarName: 'DEEPSEEK_API_KEY',
+    endpointLabel: '/api/llm/generate (api.deepseek.com)',
+    endpointUrl: 'https://api.deepseek.com/chat/completions',
+    consoleUrl: 'https://platform.deepseek.com/api_keys',
+    defaultModel: 'deepseek-chat',
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+    keyPlaceholder: 'DEEPSEEK_API_KEY (Server Secret)',
+    supportsVision: false,
+    description:
+      'Server-proxied DeepSeek reasoning API (processes text prompts, OCR, and EXIF context).',
+  },
+  {
+    id: 'mistral',
+    name: 'Mistral',
+    envVarName: 'MISTRAL_API_KEY',
+    endpointLabel: '/api/llm/generate (api.mistral.ai)',
+    endpointUrl: 'https://api.mistral.ai/v1/chat/completions',
+    consoleUrl: 'https://console.mistral.ai/api-keys',
+    defaultModel: 'pixtral-large-latest',
+    models: [
+      'pixtral-large-latest',
+      'pixtral-12b-2409',
+      'mistral-large-latest',
+      'mistral-small-latest',
+    ],
+    keyPlaceholder: 'MISTRAL_API_KEY (Server Secret)',
+    supportsVision: true,
+    description: 'Server-proxied Mistral API with Pixtral multimodal vision models.',
+  },
+] as const;
+
+export function getProviderMeta(providerId: LlmProviderId): LlmProviderMeta {
+  const found = LLM_PROVIDERS.find((p) => p.id === providerId);
+  return found ?? LLM_PROVIDERS[3];
+}
+
+export type OpenAiContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export interface OpenAiCompatibleRequestSpec {
+  url: string;
+  headers: Record<string, string>;
+  body: {
+    model: string;
+    messages: Array<{
+      role: 'system' | 'user';
+      content: string | OpenAiContentPart[];
+    }>;
+  };
+}
+
+/**
+ * Builds an upstream OpenAI-compatible Chat Completions request for OpenAI, OpenRouter, DeepSeek, or Mistral.
+ * Executed on the backend proxy server using server-side environment variable credentials.
+ */
+export function buildOpenAiCompatibleRequest(params: {
+  provider: 'openai' | 'openrouter' | 'deepseek' | 'mistral';
+  apiKey: string;
+  model: string;
+  promptText: string;
+  images: ParsedInlineImage[];
+  systemPrompt?: string;
+  origin?: string;
+}): OpenAiCompatibleRequestSpec {
+  const { provider, apiKey, model, promptText, images, systemPrompt, origin } = params;
+  const meta = getProviderMeta(provider);
+  const url = meta.endpointUrl!;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey.trim()}`,
+  };
+
+  if (provider === 'openrouter') {
+    if (origin) {
+      headers['HTTP-Referer'] = origin;
+    }
+    headers['X-Title'] = 'Traceboard Image OSINT Canvas';
+  }
+
+  let content: string | OpenAiContentPart[];
+  if (images.length > 0 && meta.supportsVision) {
+    content = [
+      { type: 'text', text: promptText },
+      ...images.map((img) => ({
+        type: 'image_url' as const,
+        image_url: {
+          url: `data:${img.mimeType};base64,${img.data}`,
+        },
+      })),
+    ];
+  } else if (images.length > 0 && !meta.supportsVision) {
+    content =
+      `${promptText}\n\n` +
+      `[Attachment note: ${images.length} image frame(s) were wired, but ${meta.name} text models inspect text, OCR, and EXIF metadata context rather than raw pixels.]`;
+  } else {
+    content = promptText;
+  }
+
+  const messages: OpenAiCompatibleRequestSpec['body']['messages'] = [];
+  if (systemPrompt?.trim()) {
+    messages.push({
+      role: 'system',
+      content: systemPrompt.trim(),
+    });
+  }
+  messages.push({
+    role: 'user',
+    content,
+  });
+
+  return {
+    url,
+    headers,
+    body: {
+      model: model.trim() || meta.defaultModel,
+      messages,
+    },
+  };
+}
+
+export type AnthropicContentPart =
+  | {
+      type: 'image';
+      source: {
+        type: 'base64';
+        media_type: string;
+        data: string;
+      };
+    }
+  | {
+      type: 'text';
+      text: string;
+    };
+
+export interface AnthropicRequestSpec {
+  url: string;
+  headers: Record<string, string>;
+  body: {
+    model: string;
+    max_tokens: number;
+    system?: string;
+    messages: Array<{
+      role: 'user';
+      content: AnthropicContentPart[];
+    }>;
+  };
+}
+
+/**
+ * Builds an upstream Anthropic Messages API multimodal request.
+ * Executed on the backend proxy server using server-side environment variable credentials.
+ */
+export function buildAnthropicRequest(params: {
+  apiKey: string;
+  model: string;
+  promptText: string;
+  images: ParsedInlineImage[];
+  systemPrompt?: string;
+}): AnthropicRequestSpec {
+  const { apiKey, model, promptText, images, systemPrompt } = params;
+  const meta = getProviderMeta('anthropic');
+
+  const content: AnthropicContentPart[] = [
+    ...images.map((img) => ({
+      type: 'image' as const,
+      source: {
+        type: 'base64' as const,
+        media_type: img.mimeType,
+        data: img.data,
+      },
+    })),
+    {
+      type: 'text' as const,
+      text: promptText,
+    },
+  ];
+
+  const body: AnthropicRequestSpec['body'] = {
+    model: model.trim() || meta.defaultModel,
+    max_tokens: 2048,
+    messages: [
+      {
+        role: 'user',
+        content,
+      },
+    ],
+  };
+
+  if (systemPrompt?.trim()) {
+    body.system = systemPrompt.trim();
+  }
+
+  return {
+    url: meta.endpointUrl!,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey.trim(),
+      'anthropic-version': '2023-06-01',
+    },
+    body,
+  };
+}
+
+export function extractOpenAiResponseText(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return '';
+  const first = choices[0] as {
+    message?: { content?: unknown };
+  };
+  const content = first?.message?.content;
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object' && 'text' in part) {
+          const textVal = (part as { text?: unknown }).text;
+          return typeof textVal === 'string' ? textVal : '';
+        }
+        return '';
+      })
+      .join('\n')
+      .trim();
+  }
+  return '';
+}
+
+export function extractAnthropicResponseText(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const content = (payload as { content?: unknown }).content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter(
+      (block): block is { type: string; text: string } =>
+        Boolean(block) &&
+        typeof block === 'object' &&
+        (block as { type?: unknown }).type === 'text' &&
+        typeof (block as { text?: unknown }).text === 'string',
+    )
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
+}
+
+export function readApiErrorMessage(payload: unknown, fallbackStatus: number): string {
+  if (payload && typeof payload === 'object') {
+    const rec = payload as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+    };
+    if (typeof rec.error === 'string' && rec.error.trim()) return rec.error;
+    if (
+      rec.error &&
+      typeof rec.error === 'object' &&
+      typeof rec.error.message === 'string' &&
+      rec.error.message.trim()
+    ) {
+      return rec.error.message;
+    }
+    if (typeof rec.message === 'string' && rec.message.trim()) {
+      return rec.message;
+    }
+  }
+  return `Provider request failed with HTTP ${fallbackStatus}.`;
+}
+
+export interface GeminiServerRequestSpec {
+  url: string;
+  headers: Record<string, string>;
+  body: {
+    model: string;
+    promptText: string;
+    images: ParsedInlineImage[];
+    systemPrompt?: string;
+  };
+}
+
+/**
+ * Builds a server-side Gemini API proxy request payload.
+ */
+export function buildGeminiServerRequest(params: {
+  model: string;
+  promptText: string;
+  images: ParsedInlineImage[];
+  systemPrompt?: string;
+}): GeminiServerRequestSpec {
+  const meta = getProviderMeta('google');
+  const resolvedModel = params.model.trim() || meta.defaultModel;
+  return {
+    url: '/api/gemini/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      model: resolvedModel,
+      promptText: params.promptText,
+      images: params.images,
+      ...(params.systemPrompt?.trim()
+        ? { systemPrompt: params.systemPrompt.trim() }
+        : {}),
+    },
+  };
+}
+
+export interface LlmProxyRequestSpec {
+  url: string;
+  headers: Record<string, string>;
+  body: {
+    provider: LlmProviderId;
+    model: string;
+    promptText: string;
+    images: ParsedInlineImage[];
+    systemPrompt?: string;
+  };
+}
+
+/**
+ * Builds a unified server-side LLM proxy request payload for any provider
+ * (Google Gemini, Anthropic, OpenAI, OpenRouter, DeepSeek, or Mistral).
+ * No API keys are included in client-side headers or body.
+ */
+export function buildLlmProxyRequest(params: {
+  provider: LlmProviderId;
+  model: string;
+  promptText: string;
+  images: ParsedInlineImage[];
+  systemPrompt?: string;
+}): LlmProxyRequestSpec {
+  const meta = getProviderMeta(params.provider);
+  const resolvedModel = params.model.trim() || meta.defaultModel;
+  return {
+    url: '/api/llm/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      provider: params.provider,
+      model: resolvedModel,
+      promptText: params.promptText,
+      images: params.images,
+      ...(params.systemPrompt?.trim()
+        ? { systemPrompt: params.systemPrompt.trim() }
+        : {}),
+    },
+  };
+}
+
+/**
+ * Executes a multimodal OSINT inspection request via the backend API proxy layer (`/api/llm/generate`).
+ * All provider API keys are resolved exclusively from server-side environment variables.
+ */
+export async function runMultiProviderAnalysis(params: {
+  provider: LlmProviderId;
+  apiKey?: string;
+  model: string;
+  promptText: string;
+  images: ParsedInlineImage[];
+  systemPrompt?: string;
+}): Promise<string> {
+  const { provider, model, promptText, images, systemPrompt } = params;
+  const meta = getProviderMeta(provider);
+  const spec = buildLlmProxyRequest({
+    provider,
+    model,
+    promptText,
+    images,
+    systemPrompt,
+  });
+
+  const res = await fetch(spec.url, {
+    method: 'POST',
+    headers: spec.headers,
+    body: JSON.stringify(spec.body),
+  });
+
+  const json = (await res.json().catch(() => null)) as {
+    text?: unknown;
+    error?: unknown;
+    message?: unknown;
+  } | null;
+
+  if (!res.ok) {
+    throw new Error(readApiErrorMessage(json, res.status));
+  }
+
+  const text = json && typeof json.text === 'string' ? json.text.trim() : '';
+  return text || `${meta.name} returned an empty response for this inspection.`;
+}

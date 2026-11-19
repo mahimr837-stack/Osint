@@ -1,0 +1,8 @@
+{
+  "name": "Traceboard — Image OSINT Canvas",
+  "description": "Minimalist infinite node-based canvas for visual OSINT image grouping, contextual prompting, and forensic analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
