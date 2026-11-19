@@ -3,10 +3,31 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const REQUEST_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-  Accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
   'Accept-Language': 'en-US,en;q=0.9',
 };
+
+export interface NativeOsintPlatform {
+  id: string;
+  label: string;
+  buildUrl: (username: string) => string;
+  requestUrl?: (username: string) => string;
+  notFoundMarkers?: string[];
+  verifyBody?: (bodyLower: string, usernameLower: string) => boolean;
+}
+
+export interface NativeOsintCheck {
+  platform: string;
+  url: string;
+  exists: boolean;
+  status: number | null;
+  reason: string;
+}
+
+export interface NativeOsintResult {
+  found: string[];
+  checks: NativeOsintCheck[];
+}
 
 /**
  * Platform definitions for native HTTP username OSINT checks.
@@ -14,7 +35,7 @@ const REQUEST_HEADERS = {
  * - `verifyBody`: optional predicate for SPA / login-walled platforms (Instagram, Reddit, Twitch)
  *   that return HTTP 200 even when a profile does not exist.
  */
-export const OSINT_PLATFORMS = [
+export const OSINT_PLATFORMS: readonly NativeOsintPlatform[] = [
   {
     id: 'github',
     label: 'GitHub',
@@ -97,7 +118,11 @@ export const OSINT_PLATFORMS = [
   },
 ];
 
-async function checkSinglePlatform(platform, username, timeoutMs) {
+async function checkSinglePlatform(
+  platform: NativeOsintPlatform,
+  username: string,
+  timeoutMs: number,
+): Promise<NativeOsintCheck> {
   const profileUrl = platform.buildUrl(username);
   const fetchUrl = platform.requestUrl ? platform.requestUrl(username) : profileUrl;
   const controller = new AbortController();
@@ -161,13 +186,14 @@ async function checkSinglePlatform(platform, username, timeoutMs) {
 
     return { platform: platform.id, url: profileUrl, exists: false, status, reason: `http_${status}` };
   } catch (err) {
-    const isTimeout = err?.name === 'AbortError';
+    const error = err as { name?: string; message?: string };
+    const isTimeout = error?.name === 'AbortError';
     return {
       platform: platform.id,
       url: profileUrl,
       exists: false,
       status: null,
-      reason: isTimeout ? 'timeout' : err?.message || 'network_error',
+      reason: isTimeout ? 'timeout' : error?.message || 'network_error',
     };
   } finally {
     clearTimeout(timer);
@@ -178,7 +204,10 @@ async function checkSinglePlatform(platform, username, timeoutMs) {
  * Checks username existence across supported platforms in parallel using native fetch.
  * Returns confirmed found profile URLs alongside per-platform diagnostic details.
  */
-export async function checkUsername(username, options = {}) {
+export async function checkUsername(
+  username: string,
+  options: { timeoutMs?: number } = {},
+): Promise<NativeOsintResult> {
   const timeoutMs = Number(options.timeoutMs) || DEFAULT_TIMEOUT_MS;
 
   const settled = await Promise.allSettled(
@@ -187,15 +216,16 @@ export async function checkUsername(username, options = {}) {
     ),
   );
 
-  const checks = settled.map((entry, idx) => {
+  const checks: NativeOsintCheck[] = settled.map((entry, idx) => {
     if (entry.status === 'fulfilled') return entry.value;
     const platform = OSINT_PLATFORMS[idx];
+    const reason = entry.reason as { message?: string } | undefined;
     return {
       platform: platform.id,
       url: platform.buildUrl(username),
       exists: false,
       status: null,
-      reason: entry.reason?.message || 'unexpected_error',
+      reason: reason?.message || 'unexpected_error',
     };
   });
 

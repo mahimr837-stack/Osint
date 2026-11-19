@@ -1,16 +1,23 @@
-// Smoke test for the Traceboard backend. Run: node scripts/smoke-test.js (server must be running)
+// Smoke test for the consolidated Traceboard server (port 3000).
+// Run: NODE_OPTIONS="--dns-result-order=ipv4first" node scripts/smoke-test.js
 import WebSocket from 'ws';
 
-const BASE = process.env.BASE_URL || 'http://localhost:3001';
+const BASE = process.env.BASE_URL || 'http://localhost:3000';
 let failures = 0;
 const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  — ${detail}` : ''}`);
   if (!ok) failures++;
 };
 
-// 1. Health
+// 1. Frontend SPA + Health + Providers Status
+const rootRes = await fetch(`${BASE}/`);
+check('GET / (frontend HTML)', rootRes.status === 200, `HTTP ${rootRes.status}`);
+
 const health = await fetch(`${BASE}/api/health`).then(async (r) => [r.status, await r.json()]);
 check('GET /api/health', health[0] === 200 && health[1].status === 'ok', JSON.stringify(health[1]));
+
+const providers = await fetch(`${BASE}/api/providers/status`).then(async (r) => [r.status, await r.json()]);
+check('GET /api/providers/status', providers[0] === 200 && typeof providers[1].providers === 'object', `HTTP ${providers[0]}`);
 
 // 2. CORS: allowed vs disallowed origins
 for (const [origin, expectAllowed] of [
@@ -23,7 +30,7 @@ for (const [origin, expectAllowed] of [
   check(`CORS ${origin}`, expectAllowed ? acao === origin : acao === null, `ACAO=${acao}`);
 }
 
-// 3. Pivot: live native OSINT check for known username ("octocat") + invalid username rejection
+// 3. Native OSINT Pivot: known username ("octocat") + unsafe username rejection
 const pivot = await fetch(`${BASE}/api/osint/pivot`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
@@ -45,7 +52,7 @@ const bad = await fetch(`${BASE}/api/osint/pivot`, {
 });
 check('POST /api/osint/pivot rejects unsafe username', bad.status === 400, `HTTP ${bad.status}`);
 
-// 4. WebSocket broadcast relay (sender -> receiver, text + binary, no self-echo)
+// 4. WebSocket broadcast relay on /sync (sender -> receiver, text + binary, no self-echo)
 await new Promise((resolve) => {
   const wsUrl = BASE.replace(/^http/, 'ws') + '/sync';
   const receiver = new WebSocket(wsUrl);
@@ -54,7 +61,7 @@ await new Promise((resolve) => {
     target_id: 'new',
     image_base64: 'data:image/png;base64,iVBORw0KGgo=',
   });
-  const binary = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]); // fake JPEG header
+  const binary = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
   const received = [];
   let senderEchoed = false;
   let openCount = 0;
@@ -90,7 +97,6 @@ await new Promise((resolve) => {
   receiver.on('message', (data, isBinary) => {
     received.push({ data, isBinary });
     if (received.length === 2) {
-      // Brief pause to confirm sender does not receive self-echo
       setTimeout(() => {
         check(
           'WebSocket text relay',
@@ -119,8 +125,15 @@ await new Promise((resolve) => {
 // 5. WebSocket on a wrong path must be rejected
 await new Promise((resolve) => {
   const ws = new WebSocket(BASE.replace(/^http/, 'ws') + '/nope');
-  ws.on('open', () => { check('WebSocket wrong path rejected', false); ws.close(); resolve(); });
-  ws.on('error', () => { check('WebSocket wrong path rejected', true); resolve(); });
+  ws.on('open', () => {
+    check('WebSocket wrong path rejected', false);
+    ws.close();
+    resolve();
+  });
+  ws.on('error', () => {
+    check('WebSocket wrong path rejected', true);
+    resolve();
+  });
 });
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');

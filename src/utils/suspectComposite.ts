@@ -1,5 +1,10 @@
 import type { Edge } from 'reactflow';
 import type { OsintNode } from '../types/osint';
+import {
+  getGlobalApiKey,
+  MISSING_API_KEY_MESSAGE,
+  readGlobalSettings,
+} from './globalSettings';
 import type { LlmProviderId } from './llmProviders';
 import { HANDLE_IDS, type ParsedInlineImage } from './osintGraph';
 
@@ -238,26 +243,35 @@ export interface ServerImageGenerationRequestSpec {
     provider: LlmProviderId;
     prompt: string;
     images: ParsedInlineImage[];
+    apiKey?: string;
   };
 }
 
 /**
  * Builds the client-to-server request spec for `/api/image/generate`.
+ * Pulls the global API key from localStorage when available.
  */
 export function buildServerImageGenerationRequest(params: {
-  provider: LlmProviderId;
+  provider?: LlmProviderId;
+  apiKey?: string;
   prompt: string;
   images?: ParsedInlineImage[];
 }): ServerImageGenerationRequestSpec {
+  const globalSettings = readGlobalSettings();
+  const resolvedProvider = params.provider ?? globalSettings.provider;
+  const resolvedApiKey =
+    params.apiKey?.trim() || getGlobalApiKey(resolvedProvider);
+
   return {
     url: SERVER_IMAGE_GENERATE_ENDPOINT,
     headers: {
       'Content-Type': 'application/json',
     },
     body: {
-      provider: params.provider,
+      provider: resolvedProvider,
       prompt: params.prompt.trim(),
       images: params.images ?? [],
+      ...(resolvedApiKey ? { apiKey: resolvedApiKey } : {}),
     },
   };
 }
@@ -265,16 +279,28 @@ export function buildServerImageGenerationRequest(params: {
 /**
  * Calls the backend `/api/image/generate` proxy endpoint to generate a forensic composite image
  * using Google Imagen (`imagen-3.0-generate-001`) or OpenAI DALL-E 3 (`dall-e-3`).
+ * Pulls the active provider and API key from global localStorage settings.
  */
 export async function requestTargetImageGeneration(params: {
-  provider: LlmProviderId;
+  provider?: LlmProviderId;
+  apiKey?: string;
   prompt: string;
   images?: ParsedInlineImage[];
   fetchImpl?: typeof fetch;
 }): Promise<{ imageUrl: string; modelUsed: string }> {
+  const globalSettings = readGlobalSettings();
+  const resolvedProvider = params.provider ?? globalSettings.provider;
+  const resolvedApiKey =
+    params.apiKey?.trim() || getGlobalApiKey(resolvedProvider);
+
+  if (!resolvedApiKey) {
+    throw new Error(MISSING_API_KEY_MESSAGE);
+  }
+
   const fetchFn = params.fetchImpl ?? fetch;
   const spec = buildServerImageGenerationRequest({
-    provider: params.provider,
+    provider: resolvedProvider,
+    apiKey: resolvedApiKey,
     prompt: params.prompt,
     images: params.images,
   });
@@ -313,7 +339,7 @@ export async function requestTargetImageGeneration(params: {
   const modelUsed =
     payload && typeof payload.model === 'string' && payload.model.trim()
       ? payload.model.trim()
-      : params.provider === 'openai'
+      : resolvedProvider === 'openai'
         ? DALLE_MODEL_ID
         : IMAGEN_MODEL_ID;
 

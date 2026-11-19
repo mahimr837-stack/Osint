@@ -31,7 +31,6 @@ import {
   ScanFace,
   ScanSearch,
   ScanText,
-  SlidersHorizontal,
   Sparkles,
   Terminal,
   Trash2,
@@ -58,7 +57,6 @@ import { PivotNode } from './components/nodes/PivotNode';
 import { DopplerNode } from './components/nodes/DopplerNode';
 import { SuspectNode } from './components/nodes/SuspectNode';
 import { Dashboard } from './components/Dashboard';
-import { ModelSettingsModal } from './components/ModelSettingsModal';
 import { RedBezierEdge } from './components/edges/RedBezierEdge';
 import { flushPendingCanvasSave, useCanvasStore } from './store/useCanvasStore';
 import {
@@ -66,7 +64,6 @@ import {
   type MobileSyncImagePayload,
 } from './hooks/useMobileSync';
 import type { DeployableOsintNodeType } from './types/osint';
-import { getProviderMeta } from './utils/llmProviders';
 import {
   buildCaseExportPayload,
   computeDroppedNodePosition,
@@ -115,7 +112,6 @@ interface OsintCanvasProps {
 }
 
 function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
-  const [isModelsModalOpen, setIsModelsModalOpen] = useState(false);
   const [draggedNodeType, setDraggedNodeType] = useState<DeployableOsintNodeType | null>(null);
   const [isDropActive, setIsDropActive] = useState(false);
 
@@ -124,8 +120,6 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
   const loadProject = useCanvasStore((state) => state.loadProject);
   const nodes = useCanvasStore((state) => state.nodes);
   const edges = useCanvasStore((state) => state.edges);
-  const provider = useCanvasStore((state) => state.provider);
-  const apiKey = useCanvasStore((state) => state.apiKey);
   const alertMessage = useCanvasStore((state) => state.alertMessage);
   const clearAlert = useCanvasStore((state) => state.clearAlert);
   const onNodesChange = useCanvasStore((state) => state.onNodesChange);
@@ -650,35 +644,14 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
 
             <div className="mx-0.5 h-5 w-px bg-neutral-200 hidden sm:block" aria-hidden="true" />
 
-            {/* Multi-Provider Models Modal Trigger */}
-            <button
-              type="button"
-              data-testid="models-settings-btn"
-              onClick={() => setIsModelsModalOpen(true)}
-              aria-label="Models"
-              className="inline-flex items-center gap-1 rounded-lg border border-neutral-200 bg-white px-2 py-1.5 text-[11px] font-medium text-neutral-800 transition-colors hover:bg-neutral-50 hover:border-neutral-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 whitespace-nowrap shrink-0"
-            >
-              <SlidersHorizontal className="h-3 w-3 text-neutral-600" />
-              <span>Models</span>
-              <span className="text-[11px] font-normal text-neutral-400">
-                · {getProviderMeta(provider).name}
-              </span>
-              {apiKey.trim() && (
-                <span
-                  aria-label="API key configured"
-                  className="h-1.5 w-1.5 rounded-full bg-emerald-500"
-                />
-              )}
-            </button>
-
             {/* Mobile Companion WebSocket Sync Status Indicator */}
             <div
               data-testid="ws-sync-indicator"
               data-status={isMobileSyncConnected ? 'connected' : 'disconnected'}
               title={
                 isMobileSyncConnected
-                  ? 'Mobile sync connected (ws://localhost:3001/sync)'
-                  : 'Mobile sync disconnected (ws://localhost:3001/sync)'
+                  ? 'Mobile sync connected (ws://localhost:3000/sync)'
+                  : 'Mobile sync disconnected (ws://localhost:3000/sync)'
               }
               aria-label={
                 isMobileSyncConnected
@@ -771,11 +744,6 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
           </div>
         </div>
       )}
-
-      <ModelSettingsModal
-        isOpen={isModelsModalOpen}
-        onClose={() => setIsModelsModalOpen(false)}
-      />
     </main>
   );
 }

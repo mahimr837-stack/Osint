@@ -57,11 +57,13 @@ import {
 } from '../utils/osintGraph';
 import { formatCroppedNodeTitle } from '../utils/imageCrop';
 import { buildVideoFrameTitle } from '../utils/videoFramesHelpers';
+import { generateGoogleDorks } from '../utils/dorkGenerator';
 import {
-  buildDorkUserPrompt,
-  DORK_SYSTEM_PROMPT,
-  parseDorkListResponse,
-} from '../utils/dorkGenerator';
+  getGlobalApiKey,
+  MISSING_API_KEY_MESSAGE,
+  readGlobalSettings,
+  saveGlobalSettings,
+} from '../utils/globalSettings';
 import {
   buildGeoIntelUserPrompt,
   GEOINTEL_SYSTEM_PROMPT,
@@ -422,9 +424,7 @@ interface CanvasState {
   ) => Promise<{ ok: boolean; error?: string }>;
 }
 
-const initialProviderConfigs = Object.fromEntries(
-  LLM_PROVIDERS.map((p) => [p.id, { apiKey: '', model: p.defaultModel }]),
-) as Record<LlmProviderId, { apiKey: string; model: string }>;
+const initialGlobalSettings = readGlobalSettings();
 
 export const useCanvasStore = create<CanvasState>((set, get) => ({
   projects: [INITIAL_DEFAULT_PROJECT],
@@ -433,10 +433,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   edges: INITIAL_EDGES,
   chatContextMap: computeChatContextMap(INITIAL_NODES, INITIAL_EDGES),
   nodeCounter: 4,
-  provider: 'google',
-  apiKey: '',
-  model: 'gemini-4-hydrogen',
-  providerConfigs: initialProviderConfigs,
+  provider: initialGlobalSettings.provider,
+  apiKey: initialGlobalSettings.apiKey,
+  model: initialGlobalSettings.model,
+  providerConfigs: initialGlobalSettings.providerConfigs,
   alertMessage: null,
   analyzingChatIds: {},
   generatingDorkIds: {},
@@ -691,16 +691,25 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
 
   setModelConfig: ({ provider, apiKey, model }) =>
-    set((state) => ({
-      provider,
-      apiKey,
-      model,
-      providerConfigs: {
+    set((state) => {
+      const nextConfigs = {
         ...state.providerConfigs,
         [provider]: { apiKey, model },
-      },
-      alertMessage: null,
-    })),
+      };
+      saveGlobalSettings({
+        provider,
+        apiKey,
+        model,
+        providerConfigs: nextConfigs,
+      });
+      return {
+        provider,
+        apiKey,
+        model,
+        providerConfigs: nextConfigs,
+        alertMessage: null,
+      };
+    }),
   setAlertMessage: (alertMessage) => set({ alertMessage }),
   clearAlert: () => set({ alertMessage: null }),
 
@@ -1394,6 +1403,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   },
 
   analyzeChatNode: async (chatNodeId, prompt) => {
+    const globalSettings = readGlobalSettings();
+    const activeProvider = globalSettings.provider;
+    const activeApiKey = getGlobalApiKey(activeProvider);
+    if (!activeApiKey) {
+      set({ alertMessage: MISSING_API_KEY_MESSAGE });
+      return false;
+    }
+
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
       set({ alertMessage: 'Enter an analysis prompt before clicking Analyze.' });
@@ -1401,8 +1418,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     }
 
     const initialState = get();
-    const providerMeta = getProviderMeta(initialState.provider);
-    const resolvedModel = initialState.model.trim() || providerMeta.defaultModel;
+    const providerMeta = getProviderMeta(activeProvider);
+    const resolvedModel =
+      globalSettings.model.trim() || providerMeta.defaultModel;
 
     const contextEntry = initialState.chatContextMap[chatNodeId];
     const hasImages = Boolean(contextEntry && contextEntry.allConnectedImageIds.length > 0);
@@ -1577,8 +1595,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       });
 
       const analysisText = await runMultiProviderAnalysis({
-        provider: initialState.provider,
-        model: resolvedModel,
         promptText: structuredPrompt,
         images: inlineImageParts,
       });
@@ -1753,6 +1769,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       return { ok: false, error: 'DorkNode not found.' };
     }
 
+    const globalSettings = readGlobalSettings();
+    const activeApiKey = getGlobalApiKey(globalSettings.provider);
+    if (!activeApiKey) {
+      set({ alertMessage: MISSING_API_KEY_MESSAGE });
+      return { ok: false, error: MISSING_API_KEY_MESSAGE };
+    }
+
     const resolvedSource = resolveDorkSourceForNode(
       dorkNodeId,
       initialState.nodes,
@@ -1771,9 +1794,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       return { ok: false, error: msg };
     }
 
-    const providerMeta = getProviderMeta(initialState.provider);
-    const resolvedModel = initialState.model.trim() || providerMeta.defaultModel;
-
     set((state) => ({
       alertMessage: null,
       generatingDorkIds: {
@@ -1783,23 +1803,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     }));
 
     try {
-      const userPrompt = buildDorkUserPrompt(
-        dorkNode.data.targetType,
-        resolvedSource.combinedText,
-      );
-
-      const rawOutput = await runMultiProviderAnalysis({
-        provider: initialState.provider,
-        model: resolvedModel,
-        systemPrompt: DORK_SYSTEM_PROMPT,
-        promptText: userPrompt,
-        images: [],
+      const parsedDorks = await generateGoogleDorks({
+        targetType: dorkNode.data.targetType,
+        extractedSourceText: resolvedSource.combinedText,
       });
-
-      const parsedDorks = parseDorkListResponse(rawOutput);
-      if (parsedDorks.length === 0) {
-        throw new Error('Model returned an empty dork list.');
-      }
 
       get().updateDorkNodeData(dorkNodeId, {
         dorks: parsedDorks,
@@ -1830,6 +1837,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       return { ok: false, error: 'GeoIntelNode not found.' };
     }
 
+    const globalSettings = readGlobalSettings();
+    const activeProvider = globalSettings.provider;
+    const activeApiKey = getGlobalApiKey(activeProvider);
+    if (!activeApiKey) {
+      set({ alertMessage: MISSING_API_KEY_MESSAGE });
+      return { ok: false, error: MISSING_API_KEY_MESSAGE };
+    }
+
     const connectedImage = getConnectedSourceImageForNode(
       geoIntelNodeId,
       initialState.nodes,
@@ -1846,14 +1861,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       return { ok: false, error: msg };
     }
 
-    const providerMeta = getProviderMeta(initialState.provider);
+    const providerMeta = getProviderMeta(activeProvider);
     if (!providerMeta.supportsVision) {
-      const msg = `${providerMeta.name} does not support image vision inputs. Select Google, OpenAI, OpenRouter, or Anthropic in Models.`;
+      const msg = `${providerMeta.name} does not support image vision inputs. Select Google, OpenAI, OpenRouter, or Anthropic in Dashboard Settings.`;
       set({ alertMessage: msg });
       return { ok: false, error: msg };
     }
-
-    const resolvedModel = initialState.model.trim() || providerMeta.defaultModel;
 
     set((state) => ({
       alertMessage: null,
@@ -1870,8 +1883,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       }
 
       const rawOutput = await runMultiProviderAnalysis({
-        provider: initialState.provider,
-        model: resolvedModel,
         systemPrompt: GEOINTEL_SYSTEM_PROMPT,
         promptText: buildGeoIntelUserPrompt(connectedImage.title),
         images: [inlinePart],
@@ -1970,6 +1981,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       return { ok: false, error: 'SuspectNode not found.' };
     }
 
+    const globalSettings = readGlobalSettings();
+    const activeProvider = globalSettings.provider;
+    const activeApiKey = getGlobalApiKey(activeProvider);
+    if (!activeApiKey) {
+      set({ alertMessage: MISSING_API_KEY_MESSAGE });
+      return { ok: false, error: MISSING_API_KEY_MESSAGE };
+    }
+
     const resolvedContext = resolveSuspectContextForNode(
       suspectNodeId,
       initialState.nodes,
@@ -2005,12 +2024,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       });
 
       const { imageUrl, modelUsed } = await requestTargetImageGeneration({
-        provider: initialState.provider,
         prompt: compiledPrompt,
         images: inlineImages,
       });
 
-      const providerMeta = getProviderMeta(initialState.provider);
+      const providerMeta = getProviderMeta(activeProvider);
       const providerLabel = `${providerMeta.name} · ${modelUsed}`;
 
       get().updateSuspectNodeData(suspectNodeId, {

@@ -8,12 +8,14 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Settings,
   Trash2,
   Workflow,
   X,
 } from 'lucide-react';
 import { useCanvasStore } from '../store/useCanvasStore';
 import type { OsintProject } from '../types/osint';
+import { GlobalSettingsModal } from './GlobalSettingsModal';
 
 export interface DashboardProps {
   onSelectProject: (projectId: string) => void;
@@ -34,6 +36,7 @@ function formatProjectDate(isoDate: string): string {
 export const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
   const projects = useCanvasStore((state) => state.projects);
   const currentProjectId = useCanvasStore((state) => state.currentProjectId);
+  const apiKey = useCanvasStore((state) => state.apiKey);
   const createProject = useCanvasStore((state) => state.createProject);
   const deleteProject = useCanvasStore((state) => state.deleteProject);
   const renameProject = useCanvasStore((state) => state.renameProject);
@@ -43,6 +46,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
   const [openMenuProjectId, setOpenMenuProjectId] = useState<string | null>(null);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const renameInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -163,6 +167,22 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
             >
               <Plus className="h-3.5 w-3.5" />
               <span>New Project</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              aria-label="Global Settings"
+              title="Global AI & API Key Settings"
+              data-testid="dashboard-settings-btn"
+              className="relative inline-flex h-9 w-9 items-center justify-center rounded-lg border border-neutral-200 bg-white text-neutral-700 shadow-2xs transition-colors hover:bg-neutral-50 hover:text-neutral-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 cursor-pointer"
+            >
+              <Settings className="h-4 w-4" />
+              {apiKey.trim() && (
+                <span
+                  aria-label="API key configured"
+                  className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500"
+                />
+              )}
             </button>
           </div>
         </div>
@@ -381,6 +401,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
           </div>
         )}
       </main>
+
+      <GlobalSettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+      />
     </div>
   );
 };

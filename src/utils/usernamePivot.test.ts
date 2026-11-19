@@ -136,11 +136,11 @@ test('runBackendPivotCheck posts username to backend and preserves mock vs sherl
   };
 
   const result = await runBackendPivotCheck(' @octocat ', {
-    endpoint: 'http://localhost:3001/api/osint/pivot',
+    endpoint: 'http://localhost:3000/api/osint/pivot',
     fetchImpl: mockFetch,
   });
 
-  assert.equal(capturedUrl, 'http://localhost:3001/api/osint/pivot');
+  assert.equal(capturedUrl, 'http://localhost:3000/api/osint/pivot');
   assert.deepEqual(JSON.parse(capturedBody), { username: 'octocat' });
   assert.equal(result.source, 'mock');
   assert.equal(result.results.length, 2);

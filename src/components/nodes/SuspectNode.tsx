@@ -55,10 +55,7 @@ export function SuspectNode({
         ? `${providerMeta.name} · ${IMAGEN_MODEL_ID}`
         : `${providerMeta.name} (Select Google or OpenAI)`;
 
-  const canGenerate =
-    !isGenerating &&
-    (data.descriptionPrompt.trim().length > 0 ||
-      resolvedContext.items.length > 0);
+  const canGenerate = !isGenerating;
 
   const handleGenerateClick = async () => {
     setLocalError(null);

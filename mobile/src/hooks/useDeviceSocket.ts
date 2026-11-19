@@ -3,20 +3,28 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export type SocketStatus = 'connecting' | 'connected' | 'disconnected';
 
 const STORAGE_KEY = 'traceboard_mobile_ws_url';
-export const DEFAULT_WS_URL = 'ws://localhost:3001/sync';
+export const DEFAULT_WS_URL = 'ws://localhost:3000/sync';
 
 function getInitialWsUrl(): string {
   try {
     const saved = window.localStorage.getItem(STORAGE_KEY)?.trim();
-    if (saved) return saved;
+    if (saved) {
+      // Automatically migrate legacy port-3001 URLs to the consolidated port-3000 server.
+      if (/:3001\/sync$/i.test(saved)) {
+        const migrated = saved.replace(/:3001\/sync$/i, ':3000/sync');
+        window.localStorage.setItem(STORAGE_KEY, migrated);
+        return migrated;
+      }
+      return saved;
+    }
   } catch {
     // Ignore storage access errors in private browsing.
   }
 
-  // Default to localhost:3001 on loopback; when opened over Wi-Fi LAN IP, suggest that host automatically.
+  // Default to localhost:3000 on loopback; when opened over Wi-Fi LAN IP, suggest that host automatically.
   const host = window.location.hostname;
   if (host && host !== 'localhost' && host !== '127.0.0.1') {
-    return `ws://${host}:3001/sync`;
+    return `ws://${host}:3000/sync`;
   }
   return DEFAULT_WS_URL;
 }

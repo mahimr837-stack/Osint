@@ -1,7 +1,10 @@
 import 'dotenv/config';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import cors from 'cors';
 import express, { type Request, type Response } from 'express';
+import { WebSocket, WebSocketServer } from 'ws';
 import { GoogleGenAI, type GenerateContentResponse } from '@google/genai';
 import {
   buildAnthropicRequest,
@@ -17,7 +20,7 @@ import {
   GEOSPY_PREDICT_ENDPOINT,
   parseGeoSpyResponse,
 } from './src/utils/geoSpy';
-import { runUsernamePivotCheck } from './src/utils/usernamePivot';
+import { checkUsername, OSINT_PLATFORMS } from './src/utils/nativeOsint';
 import {
   buildOpenAiDalleRequest,
   DALLE_MODEL_ID,
@@ -32,12 +35,14 @@ interface InlineImageInput {
 
 interface ImageGenerateBody {
   provider?: LlmProviderId;
+  apiKey?: string;
   prompt?: string;
   images?: InlineImageInput[];
 }
 
 interface LlmGenerateBody {
   provider?: LlmProviderId;
+  apiKey?: string;
   model?: string;
   promptText?: string;
   images?: InlineImageInput[];
@@ -59,20 +64,37 @@ const PROVIDER_ENV_KEYS: Record<LlmProviderId, string> = {
   mistral: 'MISTRAL_API_KEY',
 };
 
+const PLACEHOLDER_ENV_VALUES = new Set([
+  'MY_GEMINI_API_KEY',
+  'YOUR_ACTUAL_KEY_HERE',
+  'YOUR_GEMINI_API_KEY_HERE',
+]);
+
 function readServerEnvKey(envVarName: string): string {
   const raw = process.env[envVarName];
   if (!raw || typeof raw !== 'string') return '';
   const trimmed = raw.trim();
-  if (!trimmed || trimmed === 'MY_GEMINI_API_KEY') return '';
+  if (!trimmed || PLACEHOLDER_ENV_VALUES.has(trimmed)) return '';
   return trimmed;
 }
 
-function getGeminiClient(): GoogleGenAI {
-  const apiKey = readServerEnvKey('GEMINI_API_KEY');
+function resolveEffectiveApiKey(
+  clientApiKey: string | undefined,
+  envVarName: string,
+): string {
+  if (typeof clientApiKey === 'string') {
+    const trimmed = clientApiKey.trim();
+    if (trimmed && !PLACEHOLDER_ENV_VALUES.has(trimmed)) {
+      return trimmed;
+    }
+  }
+  return readServerEnvKey(envVarName);
+}
+
+function getGeminiClient(clientApiKey?: string): GoogleGenAI {
+  const apiKey = resolveEffectiveApiKey(clientApiKey, 'GEMINI_API_KEY');
   if (!apiKey) {
-    throw new Error(
-      'GEMINI_API_KEY is not configured on the server. Please check the Settings > Secrets panel.',
-    );
+    throw new Error('Please set your API key in the Dashboard Settings.');
   }
   return new GoogleGenAI({
     apiKey,
@@ -124,6 +146,13 @@ function formatServerProviderError(
       ? error.message
       : `${providerName} API request failed on the server.`;
 
+  if (rawMessage.includes('Please set your API key in the Dashboard Settings.')) {
+    return {
+      status: 403,
+      message: rawMessage,
+    };
+  }
+
   if (
     rawMessage.includes('API_KEY_INVALID') ||
     rawMessage.includes('PERMISSION_DENIED') ||
@@ -134,14 +163,14 @@ function formatServerProviderError(
   ) {
     return {
       status: 403,
-      message: `${rawMessage} Configure ${envVarName} in the Settings > Secrets panel.`,
+      message: `${rawMessage} Please check your ${providerName} API key in Dashboard Settings (or ${envVarName} on the server).`,
     };
   }
 
   if (rawMessage.includes('RESOURCE_EXHAUSTED') || rawMessage.includes('429')) {
     return {
       status: 429,
-      message: `${rawMessage} Check quota or billing for ${envVarName} in the Settings > Secrets panel.`,
+      message: `${rawMessage} Check quota or billing for ${providerName} (${envVarName}).`,
     };
   }
 
@@ -153,18 +182,19 @@ function formatServerProviderError(
 
 async function executeProviderGeneration(params: {
   provider: LlmProviderId;
+  apiKey?: string;
   model: string;
   promptText: string;
   images: InlineImageInput[];
   systemPrompt?: string;
 }): Promise<string> {
-  const { provider, model, promptText, images, systemPrompt } = params;
+  const { provider, apiKey, model, promptText, images, systemPrompt } = params;
   const meta = getProviderMeta(provider);
   const envVarName = PROVIDER_ENV_KEYS[provider] ?? meta.envVarName;
   const resolvedModel = model.trim() || meta.defaultModel;
 
   if (provider === 'google') {
-    const ai = getGeminiClient();
+    const ai = getGeminiClient(apiKey);
     const parts = buildGeminiParts(promptText, images);
     const response: GenerateContentResponse = await ai.models.generateContent({
       model: resolvedModel,
@@ -179,16 +209,14 @@ async function executeProviderGeneration(params: {
     );
   }
 
-  const serverApiKey = readServerEnvKey(envVarName);
-  if (!serverApiKey) {
-    throw new Error(
-      `${envVarName} is not configured on the server for ${meta.name}.`,
-    );
+  const effectiveApiKey = resolveEffectiveApiKey(apiKey, envVarName);
+  if (!effectiveApiKey) {
+    throw new Error('Please set your API key in the Dashboard Settings.');
   }
 
   if (provider === 'anthropic') {
     const spec = buildAnthropicRequest({
-      apiKey: serverApiKey,
+      apiKey: effectiveApiKey,
       model: resolvedModel,
       promptText,
       images,
@@ -213,7 +241,7 @@ async function executeProviderGeneration(params: {
     readServerEnvKey('APP_URL') || 'http://localhost:3000';
   const spec = buildOpenAiCompatibleRequest({
     provider,
-    apiKey: serverApiKey,
+    apiKey: effectiveApiKey,
     model: resolvedModel,
     promptText,
     images,
@@ -239,8 +267,28 @@ async function executeProviderGeneration(params: {
 async function startServer() {
   const app = express();
   const port = Number(process.env.PORT) || 3000;
+  const allowedOrigins = (
+    process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:5173'
+  )
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  const osintTimeoutMs = Number(process.env.OSINT_TIMEOUT_MS) || 5_000;
 
+  app.use(
+    cors({
+      origin(origin, callback) {
+        // Allow requests with no Origin header (curl, native mobile clients, same-origin).
+        if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(null, false);
+      },
+    }),
+  );
   app.use(express.json({ limit: '50mb' }));
+
+  app.get('/api/health', (_req: Request, res: Response) => {
+    res.json({ status: 'ok' });
+  });
 
   // Returns server-side configuration status for all providers without exposing any secret values
   app.get('/api/providers/status', (_req: Request, res: Response) => {
@@ -285,6 +333,7 @@ async function startServer() {
     try {
       const text = await executeProviderGeneration({
         provider: providerId,
+        apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
         model: resolvedModel,
         promptText,
         images,
@@ -323,6 +372,7 @@ async function startServer() {
     try {
       const text = await executeProviderGeneration({
         provider: 'google',
+        apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
         model: resolvedModel,
         promptText,
         images,
@@ -362,7 +412,9 @@ async function startServer() {
     res.setHeader('Connection', 'keep-alive');
 
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(
+        typeof body.apiKey === 'string' ? body.apiKey : undefined,
+      );
       const parts = buildGeminiParts(promptText, body.images);
 
       const streamResponse = await ai.models.generateContentStream({
@@ -474,21 +526,27 @@ async function startServer() {
     }
   });
 
-  // Server-side username pivot proxy route (prevents browser CORS errors on GitHub, Instagram, and Reddit)
+  // Native JS username pivot endpoint (7 platforms in parallel with soft-404 & WAF handling)
+  const PIVOT_USERNAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
   app.post('/api/osint/pivot', async (req: Request, res: Response) => {
-    const rawUsername =
+    const username =
       req.body && typeof (req.body as { username?: unknown }).username === 'string'
         ? (req.body as { username: string }).username.trim()
         : '';
 
-    if (!rawUsername) {
-      res.status(400).json({ error: 'username is required.' });
+    if (!PIVOT_USERNAME_RE.test(username)) {
+      res.status(400).json({
+        error:
+          'Invalid or missing "username" (allowed: A-Z a-z 0-9 . _ -, max 64).',
+      });
       return;
     }
 
     try {
-      const results = await runUsernamePivotCheck(rawUsername);
-      res.json({ results });
+      const { found, checks } = await checkUsername(username, {
+        timeoutMs: osintTimeoutMs,
+      });
+      res.json({ username, source: 'native', found, checks });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Server username pivot failed.';
@@ -514,11 +572,10 @@ async function startServer() {
     const inlineImages = sanitizeInlineImages(body.images);
 
     if (providerId === 'openai') {
-      const openAiKey = readServerEnvKey('OPENAI_API_KEY');
+      const openAiKey = resolveEffectiveApiKey(body.apiKey, 'OPENAI_API_KEY');
       if (!openAiKey) {
         res.status(403).json({
-          error:
-            'OPENAI_API_KEY is not configured on the server for DALL-E 3 image generation. Configure OPENAI_API_KEY in the Settings > Secrets panel or switch Provider to Google.',
+          error: 'Please set your API key in the Dashboard Settings.',
         });
         return;
       }
@@ -561,14 +618,16 @@ async function startServer() {
 
     if (providerId !== 'google') {
       res.status(400).json({
-        error: `${getProviderMeta(providerId).name} does not expose a native image generation endpoint. Select Google (Imagen 3) or OpenAI (DALL-E 3) in Models.`,
+        error: `${getProviderMeta(providerId).name} does not expose a native image generation endpoint. Select Google (Imagen 3) or OpenAI (DALL-E 3) in Dashboard Settings.`,
       });
       return;
     }
 
     // Provider is Google: Call Imagen API (imagen-3.0-generate-001)
     try {
-      const ai = getGeminiClient();
+      const ai = getGeminiClient(
+        typeof body.apiKey === 'string' ? body.apiKey : undefined,
+      );
       let finalPrompt = rawPrompt;
 
       // If connected ImageNodes were passed, optionally extract brief visual traits to enrich the Imagen prompt
@@ -624,10 +683,46 @@ async function startServer() {
     }
   });
 
+  const httpServer = http.createServer(app);
+
+  // Mobile companion sync relay on /sync (coexists cleanly with Vite HMR via noServer upgrade routing)
+  const wss = new WebSocketServer({ noServer: true });
+
+  wss.on('connection', (ws, req) => {
+    const peer = req.socket.remoteAddress;
+    console.log(`[ws] client connected from ${peer} (total: ${wss.clients.size})`);
+
+    ws.on('message', (data, isBinary) => {
+      let relayed = 0;
+      for (const client of wss.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(data, { binary: isBinary });
+          relayed++;
+        }
+      }
+      const byteLen = Buffer.isBuffer(data)
+        ? data.length
+        : Array.isArray(data)
+          ? data.reduce((sum, b) => sum + b.length, 0)
+          : (data as ArrayBuffer).byteLength;
+      console.log(
+        `[ws] relayed ${isBinary ? 'binary' : 'text'} message (${byteLen} bytes) to ${relayed} client(s)`,
+      );
+    });
+
+    ws.on('close', () =>
+      console.log(`[ws] client disconnected (total: ${wss.clients.size})`),
+    );
+    ws.on('error', (err) => console.error('[ws] error:', err.message));
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR !== 'true' ? { server: httpServer } : false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -640,8 +735,32 @@ async function startServer() {
     });
   }
 
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Server listening on http://0.0.0.0:${port}`);
+  httpServer.on('upgrade', (req, socket, head) => {
+    const protocol = req.headers['sec-websocket-protocol'];
+    // Let Vite HMR handle its own WebSocket upgrades without interference.
+    if (typeof protocol === 'string' && protocol.includes('vite-hmr')) {
+      return;
+    }
+
+    const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+    if (pathname === '/sync') {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+      return;
+    }
+
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+    socket.destroy();
+  });
+
+  httpServer.listen(port, '0.0.0.0', () => {
+    console.log(`Traceboard server listening on http://0.0.0.0:${port}`);
+    console.log(`WebSocket sync endpoint: ws://localhost:${port}/sync`);
+    console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
+    console.log(
+      `OSINT pivot engine: native fetch (${OSINT_PLATFORMS.length} platforms, ${osintTimeoutMs}ms timeout)`,
+    );
   });
 }
 

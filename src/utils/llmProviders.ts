@@ -1,4 +1,9 @@
 import type { ParsedInlineImage } from './osintGraph';
+import {
+  getGlobalApiKey,
+  MISSING_API_KEY_MESSAGE,
+  readGlobalSettings,
+} from './globalSettings';
 
 export type LlmProviderId =
   | 'anthropic'
@@ -411,63 +416,84 @@ export interface LlmProxyRequestSpec {
     promptText: string;
     images: ParsedInlineImage[];
     systemPrompt?: string;
+    apiKey?: string;
   };
 }
 
 /**
  * Builds a unified server-side LLM proxy request payload for any provider
  * (Google Gemini, Anthropic, OpenAI, OpenRouter, DeepSeek, or Mistral).
- * No API keys are included in client-side headers or body.
+ * Pulls the global API key from localStorage when available.
  */
 export function buildLlmProxyRequest(params: {
-  provider: LlmProviderId;
-  model: string;
+  provider?: LlmProviderId;
+  apiKey?: string;
+  model?: string;
   promptText: string;
   images: ParsedInlineImage[];
   systemPrompt?: string;
 }): LlmProxyRequestSpec {
-  const meta = getProviderMeta(params.provider);
-  const resolvedModel = params.model.trim() || meta.defaultModel;
+  const globalSettings = readGlobalSettings();
+  const resolvedProvider = params.provider ?? globalSettings.provider;
+  const meta = getProviderMeta(resolvedProvider);
+  const resolvedModel =
+    (params.model ?? globalSettings.model).trim() || meta.defaultModel;
+  const resolvedApiKey =
+    params.apiKey?.trim() || getGlobalApiKey(resolvedProvider);
+
   return {
     url: '/api/llm/generate',
     headers: {
       'Content-Type': 'application/json',
     },
     body: {
-      provider: params.provider,
+      provider: resolvedProvider,
       model: resolvedModel,
       promptText: params.promptText,
       images: params.images,
       ...(params.systemPrompt?.trim()
         ? { systemPrompt: params.systemPrompt.trim() }
         : {}),
+      ...(resolvedApiKey ? { apiKey: resolvedApiKey } : {}),
     },
   };
 }
 
 /**
  * Executes a multimodal OSINT inspection request via the backend API proxy layer (`/api/llm/generate`).
- * All provider API keys are resolved exclusively from server-side environment variables.
+ * Pulls the active provider, model, and API key from global localStorage settings.
  */
 export async function runMultiProviderAnalysis(params: {
-  provider: LlmProviderId;
+  provider?: LlmProviderId;
   apiKey?: string;
-  model: string;
+  model?: string;
   promptText: string;
   images: ParsedInlineImage[];
   systemPrompt?: string;
+  fetchImpl?: typeof fetch;
 }): Promise<string> {
-  const { provider, model, promptText, images, systemPrompt } = params;
+  const globalSettings = readGlobalSettings();
+  const provider = params.provider ?? globalSettings.provider;
   const meta = getProviderMeta(provider);
+  const model =
+    (params.model ?? globalSettings.model).trim() || meta.defaultModel;
+  const resolvedApiKey = params.apiKey?.trim() || getGlobalApiKey(provider);
+
+  if (!resolvedApiKey) {
+    throw new Error(MISSING_API_KEY_MESSAGE);
+  }
+
   const spec = buildLlmProxyRequest({
     provider,
+    apiKey: resolvedApiKey,
     model,
-    promptText,
-    images,
-    systemPrompt,
+    promptText: params.promptText,
+    images: params.images,
+    systemPrompt: params.systemPrompt,
   });
 
-  const res = await fetch(spec.url, {
+  const fetchFn = params.fetchImpl ?? fetch;
+  const res = await fetchFn(spec.url, {
     method: 'POST',
     headers: spec.headers,
     body: JSON.stringify(spec.body),

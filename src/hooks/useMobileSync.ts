@@ -18,11 +18,21 @@ export interface UseMobileSyncResult {
   isConnected: boolean;
 }
 
-const DEFAULT_WS_URL =
-  (typeof import.meta !== 'undefined' &&
-    (import.meta as unknown as { env?: Record<string, string> }).env
-      ?.VITE_BACKEND_WS_URL) ||
-  'ws://localhost:3001/sync';
+function resolveDefaultWsUrl(): string {
+  const envUrl =
+    typeof import.meta !== 'undefined'
+      ? (import.meta as unknown as { env?: Record<string, string> }).env
+          ?.VITE_BACKEND_WS_URL
+      : undefined;
+  if (envUrl) return envUrl;
+  if (typeof window !== 'undefined' && window.location?.host) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}/sync`;
+  }
+  return 'ws://localhost:3000/sync';
+}
+
+const DEFAULT_WS_URL = resolveDefaultWsUrl();
 
 // Only accept valid base64-encoded image data URLs to prevent XSS / broken src values.
 const IMAGE_DATA_URL_RE =

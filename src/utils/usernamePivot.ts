@@ -360,7 +360,9 @@ export const DEFAULT_BACKEND_PIVOT_URL =
     (import.meta as unknown as { env?: Record<string, string> }).env
       ?.VITE_BACKEND_URL
     ? `${(import.meta as unknown as { env: Record<string, string> }).env.VITE_BACKEND_URL.replace(/\/+$/, '')}/api/osint/pivot`
-    : 'http://localhost:3001/api/osint/pivot');
+    : typeof window !== 'undefined'
+      ? '/api/osint/pivot'
+      : 'http://localhost:3000/api/osint/pivot');
 
 /**
  * Converts a URL string returned by the backend (either bare "github.com/foo" or full "https://...")
@@ -417,7 +419,7 @@ export interface BackendPivotOptions {
 }
 
 /**
- * Calls the local Traceboard Express backend (`POST http://localhost:3001/api/osint/pivot`)
+ * Calls the consolidated Traceboard Express server (`POST /api/osint/pivot` on port 3000)
  * to run a native JS (or Sherlock / mock fallback) username pivot lookup.
  */
 export async function runBackendPivotCheck(
@@ -480,7 +482,7 @@ export async function runBackendPivotCheck(
     }
     if (err instanceof TypeError) {
       throw new Error(
-        `Could not reach local backend (${endpoint}). Ensure the backend server is running on port 3001.`,
+        `Could not reach local backend (${endpoint}). Ensure the server is running on port 3000.`,
       );
     }
     throw err;
