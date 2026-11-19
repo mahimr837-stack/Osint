@@ -69,7 +69,7 @@ import {
 } from '../utils/geoIntel';
 import { resolvePivotSourceForNode } from '../utils/osintGraph';
 import {
-  runUsernamePivotCheck,
+  runBackendPivotCheck,
   sanitizeUsernameInput,
 } from '../utils/usernamePivot';
 import {
@@ -400,6 +400,12 @@ interface CanvasState {
     croppedImageUrl: string;
     dimensionsLabel?: string;
   }) => string | null;
+  injectMobileImage: (params: {
+    targetId?: string | null;
+    imageBase64: string;
+    position?: { x: number; y: number };
+    title?: string;
+  }) => { action: 'created' | 'updated'; nodeId: string };
   setEnhanceNodeScale: (nodeId: string, scale: EnhanceScale) => void;
   analyzeChatNode: (chatNodeId: string, prompt: string) => Promise<boolean>;
   generateDorksForNode: (
@@ -1302,6 +1308,76 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     return createdId;
   },
 
+  injectMobileImage: ({ targetId, imageBase64, position, title }) => {
+    let outcome: { action: 'created' | 'updated'; nodeId: string } = {
+      action: 'created',
+      nodeId: '',
+    };
+
+    set((state) => {
+      const normalizedTargetId =
+        typeof targetId === 'string' ? targetId.trim() : '';
+      const existingTarget =
+        normalizedTargetId && normalizedTargetId !== 'new'
+          ? state.nodes.find(
+              (node) =>
+                node.id === normalizedTargetId && node.data.kind === 'image',
+            )
+          : undefined;
+
+      if (existingTarget) {
+        const nextNodes = state.nodes.map((node) => {
+          if (node.id !== existingTarget.id || node.data.kind !== 'image') {
+            return node;
+          }
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              imageUrl: imageBase64,
+              sourceLabel: 'Mobile Sync',
+              dimensions: undefined,
+            } satisfies ImageNodeData,
+          };
+        });
+        outcome = { action: 'updated', nodeId: existingTarget.id };
+        return {
+          nodes: nextNodes,
+          chatContextMap: computeChatContextMap(nextNodes, state.edges),
+        };
+      }
+
+      const index = state.nodeCounter;
+      const newImageId = `img-${index}`;
+      const fallbackPosition = {
+        x: 240 + Math.round((Math.random() - 0.5) * 160),
+        y: 180 + Math.round((Math.random() - 0.5) * 140),
+      };
+
+      const mobileNode: OsintNode = {
+        id: newImageId,
+        type: 'imageNode',
+        position: position ?? fallbackPosition,
+        data: {
+          kind: 'image',
+          title: title?.trim() || 'Mobile Upload',
+          imageUrl: imageBase64,
+          sourceLabel: 'Mobile Sync',
+        } satisfies ImageNodeData,
+      };
+
+      const nextNodes = [...state.nodes, mobileNode];
+      outcome = { action: 'created', nodeId: newImageId };
+      return {
+        nodes: nextNodes,
+        nodeCounter: index + 1,
+        chatContextMap: computeChatContextMap(nextNodes, state.edges),
+      };
+    });
+
+    return outcome;
+  },
+
   setEnhanceNodeScale: (nodeId, scale) => {
     set((state) => ({
       nodes: state.nodes.map((node) => {
@@ -1840,20 +1916,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       initialState.nodes,
       initialState.edges,
     );
-    if (!resolvedSource) {
-      const msg = 'Connect an OcrNode or ChatNode before running a username pivot.';
-      set({ alertMessage: msg });
-      return { ok: false, error: msg };
-    }
 
     const manualCandidate = sanitizeUsernameInput(pivotNode.data.usernameInput);
     const targetUsername =
-      manualCandidate || resolvedSource.suggestedUsername || '';
+      manualCandidate || resolvedSource?.suggestedUsername || '';
 
     if (!targetUsername) {
-      const msg = resolvedSource.hasText
-        ? 'Could not isolate a username from connected text. Enter a handle manually above.'
-        : 'Connected OcrNode or ChatNode has no text yet. Run extraction or analysis first.';
+      const msg = !resolvedSource
+        ? 'Enter a target username above or connect an OcrNode / ChatNode.'
+        : resolvedSource.hasText
+          ? 'Could not isolate a username from connected text. Enter a handle manually above.'
+          : 'Connected OcrNode or ChatNode has no text yet. Run extraction or analysis first.';
       set({ alertMessage: msg });
       return { ok: false, error: msg };
     }
@@ -1867,12 +1940,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     }));
 
     try {
-      const results = await runUsernamePivotCheck(targetUsername);
+      const response = await runBackendPivotCheck(targetUsername);
       get().updatePivotNodeData(pivotNodeId, {
-        usernameInput: targetUsername,
-        lastCheckedUsername: targetUsername,
-        lastSourceSummary: resolvedSource.summaryLabel,
-        results,
+        usernameInput: response.username,
+        lastCheckedUsername: response.username,
+        lastSourceSummary: resolvedSource?.summaryLabel ?? 'Manual input',
+        source: response.source,
+        results: response.results,
       });
       return { ok: true };
     } catch (error) {

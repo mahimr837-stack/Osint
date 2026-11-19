@@ -61,6 +61,10 @@ import { Dashboard } from './components/Dashboard';
 import { ModelSettingsModal } from './components/ModelSettingsModal';
 import { RedBezierEdge } from './components/edges/RedBezierEdge';
 import { flushPendingCanvasSave, useCanvasStore } from './store/useCanvasStore';
+import {
+  useMobileSync,
+  type MobileSyncImagePayload,
+} from './hooks/useMobileSync';
 import type { DeployableOsintNodeType } from './types/osint';
 import { getProviderMeta } from './utils/llmProviders';
 import {
@@ -132,8 +136,35 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
   const clearCanvas = useCanvasStore((state) => state.clearCanvas);
   const resetToSampleCanvas = useCanvasStore((state) => state.resetToSampleCanvas);
   const autoLayoutNodes = useCanvasStore((state) => state.autoLayoutNodes);
+  const injectMobileImage = useCanvasStore((state) => state.injectMobileImage);
 
   const { fitView, screenToFlowPosition } = useReactFlow();
+
+  const handleMobileImageReceived = useCallback(
+    ({ targetId, imageBase64 }: MobileSyncImagePayload) => {
+      const viewportCenter = screenToFlowPosition({
+        x: window.innerWidth / 2,
+        y: window.innerHeight / 2,
+      });
+      const offsetX = Math.round((Math.random() - 0.5) * 180);
+      const offsetY = Math.round((Math.random() - 0.5) * 140);
+
+      injectMobileImage({
+        targetId,
+        imageBase64,
+        position: {
+          x: Math.round(viewportCenter.x - 128 + offsetX),
+          y: Math.round(viewportCenter.y - 110 + offsetY),
+        },
+        title: 'Mobile Upload',
+      });
+    },
+    [injectMobileImage, screenToFlowPosition],
+  );
+
+  const { isConnected: isMobileSyncConnected } = useMobileSync({
+    onImageReceived: handleMobileImageReceived,
+  });
 
   useEffect(() => {
     if (projectId && projectId !== currentProjectId) {
@@ -639,6 +670,32 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
                 />
               )}
             </button>
+
+            {/* Mobile Companion WebSocket Sync Status Indicator */}
+            <div
+              data-testid="ws-sync-indicator"
+              data-status={isMobileSyncConnected ? 'connected' : 'disconnected'}
+              title={
+                isMobileSyncConnected
+                  ? 'Mobile sync connected (ws://localhost:3001/sync)'
+                  : 'Mobile sync disconnected (ws://localhost:3001/sync)'
+              }
+              aria-label={
+                isMobileSyncConnected
+                  ? 'Mobile sync connected'
+                  : 'Mobile sync disconnected'
+              }
+              className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 bg-white px-2 py-1.5 text-[11px] font-medium text-neutral-600 whitespace-nowrap shrink-0"
+            >
+              <span
+                data-testid="ws-sync-dot"
+                className={`h-2 w-2 rounded-full transition-colors ${
+                  isMobileSyncConnected ? 'bg-emerald-500' : 'bg-red-500'
+                }`}
+                aria-hidden="true"
+              />
+              <span>Sync</span>
+            </div>
           </div>
 
           {/* Non-blocking accessible alert banner */}

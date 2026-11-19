@@ -1,4 +1,5 @@
 export type PivotPlatformId = 'github' | 'instagram' | 'reddit';
+export type PivotSource = 'mock' | 'sherlock';
 
 export interface PivotPlatformConfig {
   id: PivotPlatformId;
@@ -9,13 +10,25 @@ export interface PivotPlatformConfig {
 }
 
 export interface PivotPlatformResult {
-  platform: PivotPlatformId;
+  platform: string;
   label: string;
   displayUrl: string;
   profileUrl: string;
   exists: boolean;
   statusCode: number | null;
   detail: string;
+}
+
+export interface BackendPivotResponse {
+  username: string;
+  source: PivotSource;
+  found: string[];
+}
+
+export interface BackendPivotResult {
+  username: string;
+  source: PivotSource;
+  results: PivotPlatformResult[];
 }
 
 export const PIVOT_PLATFORMS: readonly PivotPlatformConfig[] = [
@@ -318,6 +331,150 @@ export async function runUsernamePivotCheck(
         checkSinglePlatform(config, username, fetchImpl, controller.signal),
       ),
     );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+const BACKEND_USERNAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+const KNOWN_HOST_LABELS: Record<string, string> = {
+  'github.com': 'GitHub',
+  'reddit.com': 'Reddit',
+  'instagram.com': 'Instagram',
+  'x.com': 'X',
+  'twitter.com': 'Twitter',
+  'gitlab.com': 'GitLab',
+  'youtube.com': 'YouTube',
+  'tiktok.com': 'TikTok',
+  'linkedin.com': 'LinkedIn',
+  'pinterest.com': 'Pinterest',
+  'twitch.tv': 'Twitch',
+  'medium.com': 'Medium',
+  'keybase.io': 'Keybase',
+  't.me': 'Telegram',
+};
+
+export const DEFAULT_BACKEND_PIVOT_URL =
+  (typeof import.meta !== 'undefined' &&
+    (import.meta as unknown as { env?: Record<string, string> }).env
+      ?.VITE_BACKEND_URL
+    ? `${(import.meta as unknown as { env: Record<string, string> }).env.VITE_BACKEND_URL.replace(/\/+$/, '')}/api/osint/pivot`
+    : 'http://localhost:3001/api/osint/pivot');
+
+/**
+ * Converts a URL string returned by the backend (either bare "github.com/foo" or full "https://...")
+ * into a structured PivotPlatformResult suitable for rendering clickable links.
+ */
+export function normalizeFoundUrlToPivotResult(
+  rawUrl: string,
+  index: number,
+  source: PivotSource = 'sherlock',
+): PivotPlatformResult {
+  const trimmed = rawUrl.trim();
+  const profileUrl = /^https?:\/\//i.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+
+  let hostname = '';
+  let displayUrl = profileUrl.replace(/^https?:\/\/(?:www\.)?/i, '').replace(/\/+$/, '');
+  try {
+    const parsed = new URL(profileUrl);
+    hostname = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    const pathPart = `${parsed.pathname}${parsed.search}`.replace(/\/+$/, '');
+    displayUrl = `${hostname}${pathPart}`;
+  } catch {
+    hostname = displayUrl.split('/')[0]?.toLowerCase() || `result-${index}`;
+  }
+
+  const knownLabel = KNOWN_HOST_LABELS[hostname];
+  const fallbackBase = hostname.split('.')[0] || 'Profile';
+  const label =
+    knownLabel ??
+    fallbackBase.charAt(0).toUpperCase() + fallbackBase.slice(1);
+
+  return {
+    platform: `${hostname}-${index}`,
+    label,
+    displayUrl,
+    profileUrl,
+    exists: true,
+    statusCode: 200,
+    detail: source === 'mock' ? 'Mock backend response' : 'Found by Sherlock',
+  };
+}
+
+export interface BackendPivotOptions {
+  endpoint?: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+/**
+ * Calls the local Traceboard Express backend (`POST http://localhost:3001/api/osint/pivot`)
+ * to run a Sherlock (or mock fallback) username pivot lookup.
+ */
+export async function runBackendPivotCheck(
+  rawUsername: string,
+  options: BackendPivotOptions = {},
+): Promise<BackendPivotResult> {
+  const username = sanitizeUsernameInput(rawUsername);
+  if (!username) {
+    throw new Error('Enter or extract a valid username before pivoting.');
+  }
+  if (!BACKEND_USERNAME_RE.test(username)) {
+    throw new Error(
+      'Username may only contain letters, digits, ".", "_", and "-" (max 64 chars).',
+    );
+  }
+
+  const endpoint = options.endpoint ?? DEFAULT_BACKEND_PIVOT_URL;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs ?? 185_000;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username }),
+      signal: controller.signal,
+    });
+
+    const data = (await response.json().catch(() => null)) as
+      | (Partial<BackendPivotResponse> & { error?: string })
+      | null;
+
+    if (!response.ok) {
+      throw new Error(
+        data?.error || `Backend pivot failed with HTTP ${response.status}.`,
+      );
+    }
+
+    const source: PivotSource = data?.source === 'sherlock' ? 'sherlock' : 'mock';
+    const foundList = Array.isArray(data?.found)
+      ? data.found.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      : [];
+
+    return {
+      username: typeof data?.username === 'string' && data.username ? data.username : username,
+      source,
+      results: foundList.map((url, idx) =>
+        normalizeFoundUrlToPivotResult(url, idx, source),
+      ),
+    };
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('Pivot request timed out waiting for the local backend.');
+    }
+    if (err instanceof TypeError) {
+      throw new Error(
+        `Could not reach local backend (${endpoint}). Ensure the backend server is running on port 3001.`,
+      );
+    }
+    throw err;
   } finally {
     clearTimeout(timeoutId);
   }

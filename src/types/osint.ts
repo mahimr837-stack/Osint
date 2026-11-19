@@ -3,7 +3,7 @@ import type { FormattedExifSummary } from '../utils/osintGraph';
 import type { DorkTargetType } from '../utils/dorkGenerator';
 import type { GeoSpyPrediction } from '../utils/geoSpy';
 import type { GeoIntelClue } from '../utils/geoIntel';
-import type { PivotPlatformResult } from '../utils/usernamePivot';
+import type { PivotPlatformResult, PivotSource } from '../utils/usernamePivot';
 
 export interface OsintProject {
   id: string;
@@ -157,6 +157,7 @@ export interface PivotNodeData {
   usernameInput: string;
   lastCheckedUsername?: string | null;
   lastSourceSummary?: string | null;
+  source?: PivotSource | null;
   results: PivotPlatformResult[];
 }
 

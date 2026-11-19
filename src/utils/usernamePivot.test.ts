@@ -4,6 +4,8 @@ import {
   buildPivotUrls,
   evaluatePlatformResponse,
   extractCandidateUsername,
+  normalizeFoundUrlToPivotResult,
+  runBackendPivotCheck,
   runUsernamePivotCheck,
   sanitizeUsernameInput,
 } from './usernamePivot';
@@ -101,4 +103,61 @@ test('runUsernamePivotCheck dispatches parallel fetch checks for GitHub, Instagr
       { platform: 'reddit', displayUrl: 'reddit.com/user/ghost_hunter', exists: true },
     ],
   );
+});
+
+test('normalizeFoundUrlToPivotResult normalizes bare domains and full https URLs', () => {
+  const bare = normalizeFoundUrlToPivotResult('github.com/alice', 0, 'mock');
+  assert.equal(bare.label, 'GitHub');
+  assert.equal(bare.profileUrl, 'https://github.com/alice');
+  assert.equal(bare.displayUrl, 'github.com/alice');
+  assert.equal(bare.exists, true);
+
+  const full = normalizeFoundUrlToPivotResult('https://www.gitlab.com/alice/', 1, 'sherlock');
+  assert.equal(full.label, 'GitLab');
+  assert.equal(full.profileUrl, 'https://www.gitlab.com/alice/');
+  assert.equal(full.displayUrl, 'gitlab.com/alice');
+});
+
+test('runBackendPivotCheck posts username to backend and preserves mock vs sherlock source', async () => {
+  let capturedUrl = '';
+  let capturedBody = '';
+
+  const mockFetch: typeof fetch = async (input, init) => {
+    capturedUrl = typeof input === 'string' ? input : input.toString();
+    capturedBody = String(init?.body ?? '');
+    return new Response(
+      JSON.stringify({
+        username: 'octocat',
+        source: 'mock',
+        found: ['github.com/octocat', 'reddit.com/user/octocat'],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  };
+
+  const result = await runBackendPivotCheck(' @octocat ', {
+    endpoint: 'http://localhost:3001/api/osint/pivot',
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(capturedUrl, 'http://localhost:3001/api/osint/pivot');
+  assert.deepEqual(JSON.parse(capturedBody), { username: 'octocat' });
+  assert.equal(result.source, 'mock');
+  assert.equal(result.results.length, 2);
+  assert.equal(result.results[0].profileUrl, 'https://github.com/octocat');
+  assert.equal(result.results[1].profileUrl, 'https://reddit.com/user/octocat');
+});
+
+test('runBackendPivotCheck rejects unsafe usernames before calling fetch', async () => {
+  let called = false;
+  await assert.rejects(
+    runBackendPivotCheck('bad;rm -rf', {
+      fetchImpl: async () => {
+        called = true;
+        return new Response('{}');
+      },
+    }),
+    /Username may only contain/,
+  );
+  assert.equal(called, false);
 });

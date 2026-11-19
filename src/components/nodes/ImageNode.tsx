@@ -46,6 +46,14 @@ export function ImageNode({ id, data, selected }: NodeProps<ImageNodeData>) {
   const hasValidImage = Boolean(data.imageUrl) && !imageError;
 
   useEffect(() => {
+    setImageError(false);
+    dragStartRef.current = null;
+    setIsCropping(false);
+    setDragStart(null);
+    setSelectionRect(null);
+  }, [data.imageUrl]);
+
+  useEffect(() => {
     if (!isCropping) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -379,6 +387,8 @@ export function ImageNode({ id, data, selected }: NodeProps<ImageNodeData>) {
                   src={data.imageUrl}
                   alt={data.title || 'OSINT evidence thumbnail'}
                   referrerPolicy="no-referrer"
+                  decoding="async"
+                  onLoad={() => setImageError(false)}
                   onError={() => setImageError(true)}
                   className="h-full w-full object-cover transition-opacity duration-150 group-hover:opacity-90"
                   draggable={false}
