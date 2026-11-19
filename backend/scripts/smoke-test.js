@@ -23,13 +23,20 @@ for (const [origin, expectAllowed] of [
   check(`CORS ${origin}`, expectAllowed ? acao === origin : acao === null, `ACAO=${acao}`);
 }
 
-// 3. Pivot: valid + invalid username
+// 3. Pivot: live native OSINT check for known username ("octocat") + invalid username rejection
 const pivot = await fetch(`${BASE}/api/osint/pivot`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ username: 'test' }),
+  body: JSON.stringify({ username: 'octocat' }),
 }).then(async (r) => [r.status, await r.json()]);
-check('POST /api/osint/pivot', pivot[0] === 200 && Array.isArray(pivot[1].found), JSON.stringify(pivot[1]));
+check(
+  'POST /api/osint/pivot (octocat)',
+  pivot[0] === 200 &&
+    pivot[1].source === 'native' &&
+    Array.isArray(pivot[1].found) &&
+    pivot[1].found.includes('https://github.com/octocat'),
+  `source=${pivot[1].source}, found=${JSON.stringify(pivot[1].found)}`,
+);
 
 const bad = await fetch(`${BASE}/api/osint/pivot`, {
   method: 'POST',

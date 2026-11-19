@@ -1,5 +1,5 @@
 export type PivotPlatformId = 'github' | 'instagram' | 'reddit';
-export type PivotSource = 'mock' | 'sherlock';
+export type PivotSource = 'mock' | 'sherlock' | 'native';
 
 export interface PivotPlatformConfig {
   id: PivotPlatformId;
@@ -387,7 +387,8 @@ export function normalizeFoundUrlToPivotResult(
     hostname = displayUrl.split('/')[0]?.toLowerCase() || `result-${index}`;
   }
 
-  const knownLabel = KNOWN_HOST_LABELS[hostname];
+  const knownLabel =
+    hostname === 'steamcommunity.com' ? 'Steam' : KNOWN_HOST_LABELS[hostname];
   const fallbackBase = hostname.split('.')[0] || 'Profile';
   const label =
     knownLabel ??
@@ -400,7 +401,12 @@ export function normalizeFoundUrlToPivotResult(
     profileUrl,
     exists: true,
     statusCode: 200,
-    detail: source === 'mock' ? 'Mock backend response' : 'Found by Sherlock',
+    detail:
+      source === 'mock'
+        ? 'Mock backend response'
+        : source === 'native'
+          ? 'Verified via native OSINT check'
+          : 'Found by Sherlock',
   };
 }
 
@@ -412,7 +418,7 @@ export interface BackendPivotOptions {
 
 /**
  * Calls the local Traceboard Express backend (`POST http://localhost:3001/api/osint/pivot`)
- * to run a Sherlock (or mock fallback) username pivot lookup.
+ * to run a native JS (or Sherlock / mock fallback) username pivot lookup.
  */
 export async function runBackendPivotCheck(
   rawUsername: string,
@@ -453,7 +459,10 @@ export async function runBackendPivotCheck(
       );
     }
 
-    const source: PivotSource = data?.source === 'sherlock' ? 'sherlock' : 'mock';
+    const source: PivotSource =
+      data?.source === 'native' || data?.source === 'sherlock'
+        ? data.source
+        : 'mock';
     const foundList = Array.isArray(data?.found)
       ? data.found.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
       : [];

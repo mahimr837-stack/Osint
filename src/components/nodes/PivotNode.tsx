@@ -33,7 +33,7 @@ export function PivotNode({ id, data, selected }: NodeProps<PivotNodeData>) {
   const foundCount = results.filter((item) => item.exists).length;
   const hasChecked = Boolean(data.lastCheckedUsername);
   const isMockData = data.source === 'mock';
-  const isSherlockData = data.source === 'sherlock';
+  const isLiveBackend = data.source === 'sherlock' || data.source === 'native';
   const effectiveUsername =
     data.usernameInput !== ''
       ? data.usernameInput
@@ -87,12 +87,12 @@ export function PivotNode({ id, data, selected }: NodeProps<PivotNodeData>) {
                 MOCK DATA
               </span>
             )}
-            {isSherlockData && !isPivoting && (
+            {isLiveBackend && !isPivoting && (
               <span
-                data-testid={`pivot-sherlock-tag-${id}`}
+                data-testid={`pivot-live-tag-${id}`}
                 className="rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-700"
               >
-                SHERLOCK
+                {data.source === 'sherlock' ? 'SHERLOCK' : 'LIVE'}
               </span>
             )}
             {hasChecked && !isPivoting && (
@@ -178,7 +178,9 @@ export function PivotNode({ id, data, selected }: NodeProps<PivotNodeData>) {
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-[11px] text-neutral-500">
               <span>
-                {isSherlockData ? 'Sherlock Matches' : 'Found Profiles'}
+                {data.source === 'sherlock'
+                  ? 'Sherlock Matches'
+                  : 'Found Profiles'}
               </span>
               {data.lastCheckedUsername && (
                 <span className="font-mono-tabular truncate text-neutral-500">

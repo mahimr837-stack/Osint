@@ -1,23 +1,16 @@
 import 'dotenv/config';
-import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import http from 'node:http';
-import os from 'node:os';
-import path from 'node:path';
-import { promisify } from 'node:util';
 import cors from 'cors';
 import express from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
-
-const execFileAsync = promisify(execFile);
+import { checkUsername, OSINT_PLATFORMS } from './osint.js';
 
 const PORT = Number(process.env.PORT) || 3001;
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:5173')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
-const SHERLOCK_BIN = process.env.SHERLOCK_BIN || 'sherlock';
-const SHERLOCK_TIMEOUT_MS = Number(process.env.SHERLOCK_TIMEOUT_MS) || 180_000;
+const OSINT_TIMEOUT_MS = Number(process.env.OSINT_TIMEOUT_MS) || 5_000;
 
 // ---------------------------------------------------------------------------
 // Express (REST)
@@ -43,44 +36,9 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
-// --- Sherlock username pivot ------------------------------------------------
+// --- Native JS Username Pivot -----------------------------------------------
 
-let sherlockAvailable; // cached result of the availability probe
-
-async function isSherlockAvailable() {
-  if (sherlockAvailable !== undefined) return sherlockAvailable;
-  try {
-    await execFileAsync(SHERLOCK_BIN, ['--version'], { timeout: 15_000 });
-    sherlockAvailable = true;
-  } catch {
-    sherlockAvailable = false;
-  }
-  return sherlockAvailable;
-}
-
-// Usernames are passed as a process argument, so restrict them to a safe charset.
 const USERNAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
-
-async function runSherlock(username) {
-  const dir = await mkdtemp(path.join(process.env.TMPDIR || os.tmpdir(), 'sherlock-'));
-  const outFile = path.join(dir, `${username}.txt`);
-  try {
-    // execFile (no shell) avoids command injection via the username.
-    // Note: Sherlock's --json flag loads a *site data* file; results are written with --output.
-    await execFileAsync(
-      SHERLOCK_BIN,
-      [username, '--print-found', '--no-color', '--output', outFile],
-      { timeout: SHERLOCK_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
-    );
-    const text = await readFile(outFile, 'utf8');
-    return text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => /^https?:\/\//i.test(l));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
 
 app.post('/api/osint/pivot', async (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
@@ -88,22 +46,12 @@ app.post('/api/osint/pivot', async (req, res) => {
     return res.status(400).json({ error: 'Invalid or missing "username" (allowed: A-Z a-z 0-9 . _ -, max 64).' });
   }
 
-  if (!(await isSherlockAvailable())) {
-    // Mock mode: Sherlock is not installed in this environment.
-    return res.json({
-      username,
-      source: 'mock',
-      found: [`github.com/${username}`, `reddit.com/user/${username}`],
-    });
-  }
-
   try {
-    const found = await runSherlock(username);
-    return res.json({ username, source: 'sherlock', found });
+    const { found, checks } = await checkUsername(username, { timeoutMs: OSINT_TIMEOUT_MS });
+    return res.json({ username, source: 'native', found, checks });
   } catch (err) {
-    console.error('[pivot] sherlock failed:', err.message);
-    const timedOut = err.killed || err.signal === 'SIGTERM';
-    return res.status(timedOut ? 504 : 500).json({ error: timedOut ? 'Sherlock timed out' : 'Sherlock failed' });
+    console.error('[pivot] native check failed:', err.message);
+    return res.status(500).json({ error: 'Username lookup failed' });
   }
 });
 
@@ -137,9 +85,9 @@ wss.on('connection', (ws, req) => {
   ws.on('error', (err) => console.error('[ws] error:', err.message));
 });
 
-server.listen(PORT, '0.0.0.0', async () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Traceboard backend listening on http://0.0.0.0:${PORT}`);
   console.log(`WebSocket sync endpoint: ws://localhost:${PORT}/sync`);
   console.log(`CORS origins: ${ALLOWED_ORIGINS.join(', ')}`);
-  console.log(`Sherlock: ${(await isSherlockAvailable()) ? 'available' : 'not installed (pivot endpoint in mock mode)'}`);
+  console.log(`OSINT pivot engine: native fetch (${OSINT_PLATFORMS.length} platforms, ${OSINT_TIMEOUT_MS}ms timeout)`);
 });
