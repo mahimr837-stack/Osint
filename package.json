@@ -1,14 +1,24 @@
 {
-  "name": "react-example",
-  "private": true,
-  "version": "0.0.0",
+  "name": "trace-osint",
+  "version": "1.0.0",
+  "description": "Trace | OSINT Canvas — Node-based visual OSINT investigation canvas with mobile companion sync.",
   "type": "module",
+  "bin": {
+    "trace": "./bin/trace.js"
+  },
+  "files": [
+    "dist",
+    "mobile/dist",
+    "server.js",
+    "bin",
+    ".env.example"
+  ],
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build",
-    "start": "node server.ts",
+    "build": "vite build && cd mobile && vite build && cd .. && mkdir -p dist/src && cp -r src/assets dist/src/ && esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=server.js",
+    "start": "NODE_ENV=production node server.js",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist mobile/dist server.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

@@ -264,7 +264,11 @@ async function executeProviderGeneration(params: {
   );
 }
 
-async function startServer() {
+let isServerStarted = false;
+
+export async function startServer() {
+  if (isServerStarted) return;
+  isServerStarted = true;
   const app = express();
   const port = Number(process.env.PORT) || 3000;
   const allowedOrigins = (
@@ -716,6 +720,16 @@ async function startServer() {
     ws.on('error', (err) => console.error('[ws] error:', err.message));
   });
 
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const distPath = path.resolve(__dirname, 'dist');
+  const mobileDistPath = path.resolve(__dirname, 'mobile', 'dist');
+
+  // Serve the built Mobile Companion App at /mobile
+  app.use('/mobile', express.static(mobileDistPath));
+  app.get(['/mobile', '/mobile/*'], (_req: Request, res: Response) => {
+    res.sendFile(path.join(mobileDistPath, 'index.html'));
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -727,8 +741,6 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -755,7 +767,8 @@ async function startServer() {
   });
 
   httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`Traceboard server listening on http://0.0.0.0:${port}`);
+    console.log(`Trace | OSINT Canvas listening on http://0.0.0.0:${port}`);
+    console.log(`Mobile Companion App available at http://localhost:${port}/mobile`);
     console.log(`WebSocket sync endpoint: ws://localhost:${port}/sync`);
     console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
     console.log(

@@ -9,9 +9,30 @@ const check = (name, ok, detail = '') => {
   if (!ok) failures++;
 };
 
-// 1. Frontend SPA + Health + Providers Status
+// 1. Frontend SPA + Mobile Companion + Health + Providers Status
 const rootRes = await fetch(`${BASE}/`);
-check('GET / (frontend HTML)', rootRes.status === 200, `HTTP ${rootRes.status}`);
+const rootHtml = await rootRes.text();
+check(
+  'GET / (Trace | OSINT Canvas HTML)',
+  rootRes.status === 200 && rootHtml.includes('<title>Trace | OSINT Canvas</title>'),
+  `HTTP ${rootRes.status}`,
+);
+
+const spaRes = await fetch(`${BASE}/dashboard`);
+const spaHtml = await spaRes.text();
+check(
+  'GET /dashboard (SPA fallback)',
+  spaRes.status === 200 && spaHtml.includes('<title>Trace | OSINT Canvas</title>'),
+  `HTTP ${spaRes.status}`,
+);
+
+const mobileRes = await fetch(`${BASE}/mobile`);
+const mobileHtml = await mobileRes.text();
+check(
+  'GET /mobile (Mobile Companion App)',
+  mobileRes.status === 200 && mobileHtml.includes('<div id="root"></div>'),
+  `HTTP ${mobileRes.status}`,
+);
 
 const health = await fetch(`${BASE}/api/health`).then(async (r) => [r.status, await r.json()]);
 check('GET /api/health', health[0] === 200 && health[1].status === 'ok', JSON.stringify(health[1]));
