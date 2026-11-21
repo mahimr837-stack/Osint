@@ -47,7 +47,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 export default function App() {
-  const { wsUrl, setWsUrl, status, isConnected, sendImagePayload } =
+  const { wsUrl, pin, authError, updatePairing, status, isConnected, sendImagePayload } =
     useDeviceSocket();
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -275,7 +275,7 @@ export default function App() {
 
           {!isConnected && (
             <p className="mt-2.5 text-center text-xs text-gray-500">
-              Desktop not connected.{' '}
+              {authError ? 'PIN rejected. ' : 'Desktop not paired. '}
               <button
                 type="button"
                 onClick={() => setIsPairModalOpen(true)}
@@ -310,8 +310,10 @@ export default function App() {
       <PairDeviceModal
         isOpen={isPairModalOpen}
         currentUrl={wsUrl}
+        currentPin={pin}
         status={status}
-        onSave={setWsUrl}
+        authError={authError}
+        onSave={updatePairing}
         onClose={() => setIsPairModalOpen(false)}
       />
     </div>

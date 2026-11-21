@@ -23,6 +23,7 @@ import {
   FileText,
   Film,
   Globe,
+  History,
   MapPin,
   Maximize2,
   MessageSquarePlus,
@@ -31,6 +32,7 @@ import {
   ScanFace,
   ScanSearch,
   ScanText,
+  Server,
   Sparkles,
   Terminal,
   Trash2,
@@ -56,6 +58,8 @@ import { GeoIntelNode } from './components/nodes/GeoIntelNode';
 import { PivotNode } from './components/nodes/PivotNode';
 import { DopplerNode } from './components/nodes/DopplerNode';
 import { SuspectNode } from './components/nodes/SuspectNode';
+import { ShodanNode } from './components/nodes/ShodanNode';
+import { ArchiveNode } from './components/nodes/ArchiveNode';
 import { Dashboard } from './components/Dashboard';
 import { RedBezierEdge } from './components/edges/RedBezierEdge';
 import { flushPendingCanvasSave, useCanvasStore } from './store/useCanvasStore';
@@ -91,6 +95,8 @@ const nodeTypes: NodeTypes = {
   pivotNode: PivotNode,
   dopplerNode: DopplerNode,
   suspectNode: SuspectNode,
+  shodanNode: ShodanNode,
+  archiveNode: ArchiveNode,
 };
 
 const edgeTypes: EdgeTypes = {
@@ -156,7 +162,7 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
     [injectMobileImage, screenToFlowPosition],
   );
 
-  const { isConnected: isMobileSyncConnected } = useMobileSync({
+  const { isConnected: isMobileSyncConnected, syncPin } = useMobileSync({
     onImageReceived: handleMobileImageReceived,
   });
 
@@ -600,6 +606,38 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
 
             <button
               type="button"
+              draggable
+              onDragStart={(e) => handleToolbarNodeDragStart(e, 'shodanNode')}
+              onDragEnd={handleToolbarNodeDragEnd}
+              onClick={() => deployNode('shodanNode')}
+              aria-label="Add Shodan Node"
+              data-testid="add-shodan-node-btn"
+              data-node-type="shodanNode"
+              title="Click to add or drag onto canvas"
+              className="inline-flex cursor-grab select-none items-center gap-1 rounded-lg px-1 py-1.5 text-[11px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 hover:text-neutral-900 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 whitespace-nowrap shrink-0"
+            >
+              <Server className="h-3 w-3 text-[#ff4d4d] pointer-events-none" />
+              <span className="pointer-events-none">Shodan</span>
+            </button>
+
+            <button
+              type="button"
+              draggable
+              onDragStart={(e) => handleToolbarNodeDragStart(e, 'archiveNode')}
+              onDragEnd={handleToolbarNodeDragEnd}
+              onClick={() => deployNode('archiveNode')}
+              aria-label="Add Archive Node"
+              data-testid="add-archive-node-btn"
+              data-node-type="archiveNode"
+              title="Click to add or drag onto canvas"
+              className="inline-flex cursor-grab select-none items-center gap-1 rounded-lg px-1 py-1.5 text-[11px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 hover:text-neutral-900 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 whitespace-nowrap shrink-0"
+            >
+              <History className="h-3 w-3 text-[#ff4d4d] pointer-events-none" />
+              <span className="pointer-events-none">Archive</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => fitView({ padding: 0.22, duration: 280 })}
               aria-label="Fit canvas to nodes"
               title="Fit canvas to nodes"
@@ -650,8 +688,8 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
               data-status={isMobileSyncConnected ? 'connected' : 'disconnected'}
               title={
                 isMobileSyncConnected
-                  ? 'Mobile sync connected (ws://localhost:3000/sync)'
-                  : 'Mobile sync disconnected (ws://localhost:3000/sync)'
+                  ? `Mobile sync connected (/sync${syncPin ? ` · PIN: ${syncPin}` : ''})`
+                  : 'Mobile sync disconnected (/sync)'
               }
               aria-label={
                 isMobileSyncConnected
@@ -715,7 +753,9 @@ function OsintCanvas({ projectId, onBackToDashboard }: OsintCanvasProps) {
               node.type === 'geoSpyNode' ||
               node.type === 'geoIntelNode' ||
               node.type === 'pivotNode' ||
-              node.type === 'dopplerNode'
+              node.type === 'dopplerNode' ||
+              node.type === 'shodanNode' ||
+              node.type === 'archiveNode'
             ) {
               return '#525252';
             }

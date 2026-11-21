@@ -37,6 +37,8 @@ import type {
   PivotNodeData,
   DopplerNodeData,
   SuspectNodeData,
+  ShodanNodeData,
+  ArchiveNodeData,
   OsintProject,
 } from '../types/osint';
 import {
@@ -53,6 +55,7 @@ import {
   isValidOsintConnection,
   parseBase64DataUrl,
   type ParsedInlineImage,
+  resolveArchiveSourceForNode,
   resolveDorkSourceForNode,
 } from '../utils/osintGraph';
 import { formatCroppedNodeTitle } from '../utils/imageCrop';
@@ -60,9 +63,12 @@ import { buildVideoFrameTitle } from '../utils/videoFramesHelpers';
 import { generateGoogleDorks } from '../utils/dorkGenerator';
 import {
   getGlobalApiKey,
+  getGlobalShodanApiKey,
   MISSING_API_KEY_MESSAGE,
+  MISSING_SHODAN_KEY_MESSAGE,
   readGlobalSettings,
   saveGlobalSettings,
+  saveGlobalShodanApiKey,
 } from '../utils/globalSettings';
 import {
   buildGeoIntelUserPrompt,
@@ -74,6 +80,8 @@ import {
   runBackendPivotCheck,
   sanitizeUsernameInput,
 } from '../utils/usernamePivot';
+import { runShodanSearch } from '../utils/shodanOsint';
+import { runArchiveCheck } from '../utils/archiveOsint';
 import {
   CANVAS_SAVE_DEBOUNCE_MS,
   createDebouncedTask,
@@ -323,12 +331,15 @@ interface CanvasState {
   provider: LlmProviderId;
   apiKey: string;
   model: string;
+  shodanApiKey: string;
   providerConfigs: Record<LlmProviderId, { apiKey: string; model: string }>;
   alertMessage: string | null;
   analyzingChatIds: Record<string, boolean>;
   generatingDorkIds: Record<string, boolean>;
   extractingGeoIntelIds: Record<string, boolean>;
   pivotingNodeIds: Record<string, boolean>;
+  searchingShodanIds: Record<string, boolean>;
+  checkingArchiveIds: Record<string, boolean>;
   generatingSuspectIds: Record<string, boolean>;
   suspectImageUrls: Record<string, string | null>;
   geoSpyApiKeys: Record<string, string>;
@@ -343,6 +354,7 @@ interface CanvasState {
     apiKey: string;
     model: string;
   }) => void;
+  setShodanApiKey: (shodanApiKey: string) => void;
   setAlertMessage: (message: string | null) => void;
   clearAlert: () => void;
   hydrateFromIndexedDb: () => Promise<void>;
@@ -392,6 +404,8 @@ interface CanvasState {
   updatePivotNodeData: (nodeId: string, patch: Partial<PivotNodeData>) => void;
   updateDopplerNodeData: (nodeId: string, patch: Partial<DopplerNodeData>) => void;
   updateSuspectNodeData: (nodeId: string, patch: Partial<SuspectNodeData>) => void;
+  updateShodanNodeData: (nodeId: string, patch: Partial<ShodanNodeData>) => void;
+  updateArchiveNodeData: (nodeId: string, patch: Partial<ArchiveNodeData>) => void;
   setSuspectImageUrl: (nodeId: string, suspectImageUrl: string | null) => void;
   spawnImageNodeFromVideoFrame: (
     videoNodeId: string,
@@ -419,6 +433,13 @@ interface CanvasState {
   runPivotForNode: (
     pivotNodeId: string,
   ) => Promise<{ ok: boolean; error?: string }>;
+  runShodanForNode: (
+    shodanNodeId: string,
+    overrideApiKey?: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  runArchiveForNode: (
+    archiveNodeId: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
   generateSuspectImageForNode: (
     suspectNodeId: string,
   ) => Promise<{ ok: boolean; error?: string }>;
@@ -436,12 +457,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
   provider: initialGlobalSettings.provider,
   apiKey: initialGlobalSettings.apiKey,
   model: initialGlobalSettings.model,
+  shodanApiKey: initialGlobalSettings.shodanApiKey,
   providerConfigs: initialGlobalSettings.providerConfigs,
   alertMessage: null,
   analyzingChatIds: {},
   generatingDorkIds: {},
   extractingGeoIntelIds: {},
   pivotingNodeIds: {},
+  searchingShodanIds: {},
+  checkingArchiveIds: {},
   generatingSuspectIds: {},
   suspectImageUrls: {},
   geoSpyApiKeys: {},
@@ -710,6 +734,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         alertMessage: null,
       };
     }),
+  setShodanApiKey: (shodanApiKey) => {
+    const trimmed = shodanApiKey.trim();
+    saveGlobalShodanApiKey(trimmed);
+    set({ shodanApiKey: trimmed, alertMessage: null });
+  },
   setAlertMessage: (alertMessage) => set({ alertMessage }),
   clearAlert: () => set({ alertMessage: null }),
 
@@ -1164,6 +1193,36 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             },
           }
         : {}),
+    }));
+  },
+
+  updateShodanNodeData: (nodeId, patch) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) => {
+        if (node.id !== nodeId || node.data.kind !== 'shodan') return node;
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            ...patch,
+          } satisfies ShodanNodeData,
+        };
+      }),
+    }));
+  },
+
+  updateArchiveNodeData: (nodeId, patch) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) => {
+        if (node.id !== nodeId || node.data.kind !== 'archive') return node;
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            ...patch,
+          } satisfies ArchiveNodeData,
+        };
+      }),
     }));
   },
 
@@ -1969,6 +2028,121 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         pivotingNodeIds: {
           ...state.pivotingNodeIds,
           [pivotNodeId]: false,
+        },
+      }));
+    }
+  },
+
+  runShodanForNode: async (shodanNodeId, overrideApiKey) => {
+    const initialState = get();
+    const shodanNode = initialState.nodes.find((n) => n.id === shodanNodeId);
+    if (!shodanNode || shodanNode.data.kind !== 'shodan') {
+      return { ok: false, error: 'ShodanNode not found.' };
+    }
+
+    const query = shodanNode.data.queryInput.trim();
+    if (!query) {
+      const msg = 'Enter an IP address or Shodan search query first.';
+      set({ alertMessage: msg });
+      return { ok: false, error: msg };
+    }
+
+    const effectiveKey =
+      overrideApiKey?.trim() ||
+      initialState.shodanApiKey.trim() ||
+      getGlobalShodanApiKey();
+    if (!effectiveKey) {
+      set({ alertMessage: MISSING_SHODAN_KEY_MESSAGE });
+      return { ok: false, error: MISSING_SHODAN_KEY_MESSAGE };
+    }
+
+    set((state) => ({
+      alertMessage: null,
+      searchingShodanIds: {
+        ...state.searchingShodanIds,
+        [shodanNodeId]: true,
+      },
+    }));
+
+    try {
+      const response = await runShodanSearch({
+        query,
+        apiKey: effectiveKey,
+      });
+      get().updateShodanNodeData(shodanNodeId, {
+        lastQuery: response.query,
+        mode: response.mode,
+        total: response.total,
+        results: response.results,
+      });
+      return { ok: true };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Shodan host lookup failed.';
+      return { ok: false, error: message };
+    } finally {
+      set((state) => ({
+        searchingShodanIds: {
+          ...state.searchingShodanIds,
+          [shodanNodeId]: false,
+        },
+      }));
+    }
+  },
+
+  runArchiveForNode: async (archiveNodeId) => {
+    const initialState = get();
+    const archiveNode = initialState.nodes.find((n) => n.id === archiveNodeId);
+    if (!archiveNode || archiveNode.data.kind !== 'archive') {
+      return { ok: false, error: 'ArchiveNode not found.' };
+    }
+
+    const resolvedSource = resolveArchiveSourceForNode(
+      archiveNodeId,
+      initialState.nodes,
+      initialState.edges,
+    );
+    const manualUrl = archiveNode.data.urlInput.trim();
+    const targetUrl = manualUrl || resolvedSource?.suggestedUrl || '';
+
+    if (!targetUrl) {
+      const msg = !resolvedSource
+        ? 'Enter a URL/domain above or connect a ChatNode / OcrNode.'
+        : resolvedSource.hasText
+          ? 'Could not isolate a URL or domain from connected text. Enter one manually above.'
+          : 'Connected ChatNode or OcrNode has no text yet. Run extraction or analysis first.';
+      set({ alertMessage: msg });
+      return { ok: false, error: msg };
+    }
+
+    set((state) => ({
+      alertMessage: null,
+      checkingArchiveIds: {
+        ...state.checkingArchiveIds,
+        [archiveNodeId]: true,
+      },
+    }));
+
+    try {
+      const response = await runArchiveCheck({ url: targetUrl });
+      get().updateArchiveNodeData(archiveNodeId, {
+        urlInput: response.url,
+        lastCheckedUrl: response.url,
+        lastSourceSummary: resolvedSource?.summaryLabel ?? 'Direct input',
+        snapshots: response.snapshots,
+      });
+      return { ok: true };
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Wayback Machine archive check failed.';
+      return { ok: false, error: message };
+    } finally {
+      set((state) => ({
+        checkingArchiveIds: {
+          ...state.checkingArchiveIds,
+          [archiveNodeId]: false,
         },
       }));
     }

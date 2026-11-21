@@ -5,38 +5,49 @@ import { DEFAULT_WS_URL, type SocketStatus } from '../hooks/useDeviceSocket';
 interface PairDeviceModalProps {
   isOpen: boolean;
   currentUrl: string;
+  currentPin: string;
   status: SocketStatus;
-  onSave: (url: string) => void;
+  authError?: string | null;
+  onSave: (url: string, pin: string) => void;
   onClose: () => void;
 }
 
 export function PairDeviceModal({
   isOpen,
   currentUrl,
+  currentPin,
   status,
+  authError,
   onSave,
   onClose,
 }: PairDeviceModalProps) {
   const [urlInput, setUrlInput] = useState(currentUrl);
+  const [pinInput, setPinInput] = useState(currentPin);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen) {
       setUrlInput(currentUrl);
+      setPinInput(currentPin);
       setValidationError(null);
     }
-  }, [isOpen, currentUrl]);
+  }, [isOpen, currentUrl, currentPin]);
 
   if (!isOpen) return null;
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
-    const trimmed = urlInput.trim();
-    if (!/^wss?:\/\/.+/i.test(trimmed)) {
+    const trimmedUrl = urlInput.trim();
+    const trimmedPin = pinInput.trim();
+    if (!/^wss?:\/\/.+/i.test(trimmedUrl)) {
       setValidationError('Enter a valid WebSocket URL starting with ws:// or wss://');
       return;
     }
-    onSave(trimmed);
+    if (!/^\d{6}$/.test(trimmedPin)) {
+      setValidationError('Enter the 6-digit WebSocket PIN shown in your Trace terminal.');
+      return;
+    }
+    onSave(trimmedUrl, trimmedPin);
     onClose();
   };
 
@@ -84,13 +95,22 @@ export function PairDeviceModal({
         </div>
 
         <p className="mt-1.5 text-sm text-gray-500">
-          Enter your desktop backend WebSocket URL to send photos directly to the canvas.
+          Enter your desktop WebSocket URL and the 6-digit PIN printed in your Trace terminal.
         </p>
 
         <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
           <span className={`h-2 w-2 rounded-full ${statusDotClass}`} />
           <span>{statusLabel}</span>
         </div>
+
+        {authError && !validationError && (
+          <p
+            data-testid="pair-auth-error"
+            className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+          >
+            {authError}
+          </p>
+        )}
 
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
           <div>
@@ -126,6 +146,31 @@ export function PairDeviceModal({
               spellCheck={false}
               data-testid="pair-ws-url-input"
               className="mt-1.5 w-full rounded-xl border border-gray-300 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="ws-pin-input"
+              className="block text-sm font-medium text-gray-700"
+            >
+              6-Digit Sync PIN
+            </label>
+            <input
+              id="ws-pin-input"
+              type="text"
+              inputMode="numeric"
+              pattern="\d{6}"
+              maxLength={6}
+              value={pinInput}
+              onChange={(e) => {
+                setPinInput(e.target.value.replace(/\D/g, '').slice(0, 6));
+                setValidationError(null);
+              }}
+              placeholder="123456"
+              autoComplete="one-time-code"
+              data-testid="pair-pin-input"
+              className="mt-1.5 w-full rounded-xl border border-gray-300 bg-white px-3.5 py-2.5 font-mono text-base tracking-[0.25em] text-gray-900 placeholder:tracking-normal placeholder:text-gray-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
             />
             {validationError && (
               <p className="mt-1.5 text-xs text-red-600">{validationError}</p>

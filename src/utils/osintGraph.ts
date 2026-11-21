@@ -21,9 +21,12 @@ import type {
   PivotNodeData,
   DopplerNodeData,
   SuspectNodeData,
+  ShodanNodeData,
+  ArchiveNodeData,
 } from '../types/osint';
 import { parseCoordinatesFromText, type GeoCoordinates } from './mapCoordinates';
 import { extractCandidateUsername } from './usernamePivot';
+import { extractCandidateArchiveUrl } from './archiveOsint';
 import { defaultUtcInputValue } from './dopplerAudio';
 
 export const NODE_DRAG_MIME_TYPE = 'application/traceboard-node-type';
@@ -46,6 +49,8 @@ export const DEPLOYABLE_NODE_TYPES: readonly DeployableOsintNodeType[] = [
   'pivotNode',
   'dopplerNode',
   'suspectNode',
+  'shodanNode',
+  'archiveNode',
 ] as const;
 
 export function isDeployableOsintNodeType(
@@ -387,6 +392,41 @@ export function createOsintNode(params: {
         } satisfies SuspectNodeData,
       };
     }
+    case 'shodanNode': {
+      const count = existingNodes.filter((n) => n.type === 'shodanNode').length;
+      const offset = (count % 4) * 28;
+      return {
+        id: `shodan-${index}`,
+        type: 'shodanNode',
+        position: explicitPosition ?? { x: 1120, y: 1520 + offset },
+        data: {
+          kind: 'shodan',
+          title: `Shodan Intel ${index}`,
+          queryInput: '',
+          lastQuery: null,
+          mode: null,
+          total: null,
+          results: [],
+        } satisfies ShodanNodeData,
+      };
+    }
+    case 'archiveNode': {
+      const count = existingNodes.filter((n) => n.type === 'archiveNode').length;
+      const offset = (count % 4) * 28;
+      return {
+        id: `archive-${index}`,
+        type: 'archiveNode',
+        position: explicitPosition ?? { x: 1120, y: 1720 + offset },
+        data: {
+          kind: 'archive',
+          title: `Wayback Archive ${index}`,
+          urlInput: '',
+          lastCheckedUrl: null,
+          lastSourceSummary: null,
+          snapshots: [],
+        } satisfies ArchiveNodeData,
+      };
+    }
   }
 }
 
@@ -415,6 +455,8 @@ export const HANDLE_IDS = {
   PIVOT_IN: 'pivot-in',
   SUSPECT_IN: 'suspect-in',
   SUSPECT_OUT: 'suspect-out',
+  SHODAN_IN: 'shodan-in',
+  ARCHIVE_IN: 'archive-in',
 } as const;
 
 /**
@@ -617,6 +659,8 @@ export function isValidOsintConnection(
   const targetIsPivot = targetNode.type === 'pivotNode';
   const sourceIsSuspect = sourceNode.type === 'suspectNode';
   const targetIsSuspect = targetNode.type === 'suspectNode';
+  const targetIsShodan = targetNode.type === 'shodanNode';
+  const targetIsArchive = targetNode.type === 'archiveNode';
 
   // ImageNode / OcrNode / ChatNode / EnhanceNode -> SuspectNode (context inputs for composite generation)
   if (
@@ -864,6 +908,32 @@ export function isValidOsintConnection(
     const toPivotIn =
       !connection.targetHandle || connection.targetHandle === HANDLE_IDS.PIVOT_IN;
     return fromSourceOut && toPivotIn;
+  }
+
+  // OcrNode / ChatNode -> ArchiveNode (extracted URL/domain feeds Wayback Machine lookup)
+  if ((sourceIsOcr || sourceIsChat) && targetIsArchive) {
+    const expectedOut = sourceIsOcr
+      ? HANDLE_IDS.OCR_OUT
+      : HANDLE_IDS.CHAT_RESULT_OUT;
+    const fromSourceOut =
+      !connection.sourceHandle || connection.sourceHandle === expectedOut;
+    const toArchiveIn =
+      !connection.targetHandle ||
+      connection.targetHandle === HANDLE_IDS.ARCHIVE_IN;
+    return fromSourceOut && toArchiveIn;
+  }
+
+  // OcrNode / ChatNode -> ShodanNode (extracted IP/query feeds Shodan host intelligence)
+  if ((sourceIsOcr || sourceIsChat) && targetIsShodan) {
+    const expectedOut = sourceIsOcr
+      ? HANDLE_IDS.OCR_OUT
+      : HANDLE_IDS.CHAT_RESULT_OUT;
+    const fromSourceOut =
+      !connection.sourceHandle || connection.sourceHandle === expectedOut;
+    const toShodanIn =
+      !connection.targetHandle ||
+      connection.targetHandle === HANDLE_IDS.SHODAN_IN;
+    return fromSourceOut && toShodanIn;
   }
 
   return false;
@@ -1521,6 +1591,86 @@ export function resolvePivotSourceForNode(
     sources,
     rawText,
     suggestedUsername,
+    hasText: rawText.length > 0,
+    summaryLabel,
+  };
+}
+
+export interface ResolvedArchiveSource {
+  sources: PivotSourceItem[];
+  rawText: string;
+  suggestedUrl: string;
+  hasText: boolean;
+  summaryLabel: string;
+}
+
+/**
+ * Resolves connected OcrNode or ChatNode text sources feeding into an ArchiveNode
+ * and extracts a candidate URL or domain for Wayback Machine lookup.
+ */
+export function resolveArchiveSourceForNode(
+  archiveNodeId: string,
+  nodes: OsintNode[],
+  edges: Edge[],
+): ResolvedArchiveSource | null {
+  const incomingEdges = edges.filter(
+    (edge) =>
+      edge.target === archiveNodeId &&
+      (!edge.targetHandle || edge.targetHandle === HANDLE_IDS.ARCHIVE_IN),
+  );
+  if (incomingEdges.length === 0) return null;
+
+  const sources: PivotSourceItem[] = [];
+  const seenIds = new Set<string>();
+
+  for (const edge of incomingEdges) {
+    if (seenIds.has(edge.source)) continue;
+    const sourceNode = nodes.find((node) => node.id === edge.source);
+    if (!sourceNode) continue;
+
+    if (sourceNode.data.kind === 'ocr') {
+      seenIds.add(sourceNode.id);
+      sources.push({
+        nodeId: sourceNode.id,
+        title: sourceNode.data.title || 'OCR Extractor',
+        sourceType: 'ocr',
+        text: (sourceNode.data.extractedText ?? '').trim(),
+      });
+    } else if (sourceNode.data.kind === 'chat') {
+      seenIds.add(sourceNode.id);
+      const messages = sourceNode.data.messages ?? [];
+      const latestAssistant = [...messages]
+        .reverse()
+        .find((m) => m.role === 'assistant' && m.content.trim().length > 0);
+      const latestUser = [...messages]
+        .reverse()
+        .find((m) => m.role === 'user' && m.content.trim().length > 0);
+      const pickedText =
+        latestAssistant?.content.trim() ||
+        latestUser?.content.trim() ||
+        (sourceNode.data.draftPrompt ?? '').trim();
+      sources.push({
+        nodeId: sourceNode.id,
+        title: sourceNode.data.title || 'Chat Thread',
+        sourceType: 'chat',
+        text: pickedText,
+      });
+    }
+  }
+
+  if (sources.length === 0) return null;
+
+  const nonEmptyTexts = sources
+    .filter((s) => s.text.length > 0)
+    .map((s) => s.text);
+  const rawText = nonEmptyTexts.join('\n').trim();
+  const suggestedUrl = rawText ? extractCandidateArchiveUrl(rawText) : '';
+  const summaryLabel = sources.map((s) => s.title).join(', ');
+
+  return {
+    sources,
+    rawText,
+    suggestedUrl,
     hasText: rawText.length > 0,
     summaryLabel,
   };

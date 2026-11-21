@@ -4,6 +4,8 @@ import type { DorkTargetType } from '../utils/dorkGenerator';
 import type { GeoSpyPrediction } from '../utils/geoSpy';
 import type { GeoIntelClue } from '../utils/geoIntel';
 import type { PivotPlatformResult, PivotSource } from '../utils/usernamePivot';
+import type { ShodanHostResult } from '../utils/shodanOsint';
+import type { ArchiveSnapshot } from '../utils/archiveOsint';
 
 export interface OsintProject {
   id: string;
@@ -181,6 +183,25 @@ export interface SuspectNodeData {
   lastProviderLabel?: string | null;
 }
 
+export interface ShodanNodeData {
+  kind: 'shodan';
+  title: string;
+  queryInput: string;
+  lastQuery?: string | null;
+  mode?: 'host' | 'search' | null;
+  total?: number | null;
+  results: ShodanHostResult[];
+}
+
+export interface ArchiveNodeData {
+  kind: 'archive';
+  title: string;
+  urlInput: string;
+  lastCheckedUrl?: string | null;
+  lastSourceSummary?: string | null;
+  snapshots: ArchiveSnapshot[];
+}
+
 export type OsintNodeData =
   | ImageNodeData
   | ChatNodeData
@@ -198,7 +219,9 @@ export type OsintNodeData =
   | GeoIntelNodeData
   | PivotNodeData
   | DopplerNodeData
-  | SuspectNodeData;
+  | SuspectNodeData
+  | ShodanNodeData
+  | ArchiveNodeData;
 export type OsintNode = Node<OsintNodeData>;
 
 export type DeployableOsintNodeType =
@@ -218,7 +241,9 @@ export type DeployableOsintNodeType =
   | 'geoIntelNode'
   | 'pivotNode'
   | 'dopplerNode'
-  | 'suspectNode';
+  | 'suspectNode'
+  | 'shodanNode'
+  | 'archiveNode';
 
 export interface ChatContextEntry {
   globalImageIds: string[];

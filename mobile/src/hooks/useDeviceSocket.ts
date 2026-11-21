@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export type SocketStatus = 'connecting' | 'connected' | 'disconnected';
 
 const STORAGE_KEY = 'traceboard_mobile_ws_url';
+const PIN_STORAGE_KEY = 'traceboard_mobile_ws_pin';
+const WS_CLOSE_UNAUTHORIZED = 4001;
 export const DEFAULT_WS_URL = 'ws://localhost:3000/sync';
 
 function getInitialWsUrl(): string {
@@ -21,32 +23,69 @@ function getInitialWsUrl(): string {
     // Ignore storage access errors in private browsing.
   }
 
-  // Default to localhost:3000 on loopback; when opened over Wi-Fi LAN IP, suggest that host automatically.
+  // If served directly from the unified Trace server (e.g. /mobile on port 3000), use its exact host:port.
   const host = window.location.hostname;
+  const port = window.location.port;
+  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (host && port && port !== '5173') {
+    return `${wsProto}//${window.location.host}/sync`;
+  }
+  // When opened over Wi-Fi LAN IP via standalone Vite dev server (5173), suggest that host on port 3000.
   if (host && host !== 'localhost' && host !== '127.0.0.1') {
     return `ws://${host}:3000/sync`;
   }
   return DEFAULT_WS_URL;
 }
 
+function getInitialPin(): string {
+  try {
+    return window.localStorage.getItem(PIN_STORAGE_KEY)?.trim() ?? '';
+  } catch {
+    return '';
+  }
+}
+
 export function useDeviceSocket() {
   const [wsUrl, setWsUrlState] = useState<string>(getInitialWsUrl);
-  const [status, setStatus] = useState<SocketStatus>('connecting');
+  const [pin, setPinState] = useState<string>(getInitialPin);
+  const [status, setStatus] = useState<SocketStatus>(
+    getInitialPin() ? 'connecting' : 'disconnected',
+  );
+  const [authError, setAuthError] = useState<string | null>(null);
   const [reconnectTick, setReconnectTick] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
+  const isAuthenticatedRef = useRef(false);
 
-  const setWsUrl = useCallback((nextUrl: string) => {
-    const trimmed = nextUrl.trim() || DEFAULT_WS_URL;
-    setWsUrlState(trimmed);
+  const updatePairing = useCallback((nextUrl: string, nextPin: string) => {
+    const trimmedUrl = nextUrl.trim() || DEFAULT_WS_URL;
+    const trimmedPin = nextPin.trim();
+    setWsUrlState(trimmedUrl);
+    setPinState(trimmedPin);
+    setAuthError(null);
     setReconnectTick((n) => n + 1);
     try {
-      window.localStorage.setItem(STORAGE_KEY, trimmed);
+      window.localStorage.setItem(STORAGE_KEY, trimmedUrl);
+      window.localStorage.setItem(PIN_STORAGE_KEY, trimmedPin);
     } catch {
       // Ignore storage access errors.
     }
   }, []);
 
+  const setWsUrl = useCallback(
+    (nextUrl: string) => {
+      updatePairing(nextUrl, pin);
+    },
+    [pin, updatePairing],
+  );
+
   useEffect(() => {
+    isAuthenticatedRef.current = false;
+
+    if (!pin.trim()) {
+      setStatus('disconnected');
+      return;
+    }
+
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let delay = 1_500;
@@ -62,6 +101,7 @@ export function useDeviceSocket() {
 
     const connect = () => {
       if (disposed) return;
+      isAuthenticatedRef.current = false;
       setStatus('connecting');
 
       let ws: WebSocket;
@@ -77,14 +117,38 @@ export function useDeviceSocket() {
 
       ws.addEventListener('open', () => {
         if (disposed || socketRef.current !== ws) return;
-        delay = 1_500;
-        setStatus('connected');
+        ws.send(JSON.stringify({ type: 'auth', pin: pin.trim() }));
       });
 
-      ws.addEventListener('close', () => {
+      ws.addEventListener('message', (event) => {
+        if (disposed || socketRef.current !== ws) return;
+        if (typeof event.data === 'string') {
+          try {
+            const parsed = JSON.parse(event.data) as { type?: unknown } | null;
+            if (parsed && typeof parsed === 'object' && parsed.type === 'auth_ok') {
+              isAuthenticatedRef.current = true;
+              delay = 1_500;
+              setAuthError(null);
+              setStatus('connected');
+            }
+          } catch {
+            // Ignore non-JSON messages
+          }
+        }
+      });
+
+      ws.addEventListener('close', (event) => {
         if (disposed || socketRef.current !== ws) return;
         socketRef.current = null;
+        isAuthenticatedRef.current = false;
         setStatus('disconnected');
+
+        if (event.code === WS_CLOSE_UNAUTHORIZED) {
+          setAuthError(
+            'Invalid or missing PIN. Check the 6-digit PIN printed in your Trace terminal.',
+          );
+          return;
+        }
         scheduleReconnect();
       });
 
@@ -97,6 +161,7 @@ export function useDeviceSocket() {
 
     return () => {
       disposed = true;
+      isAuthenticatedRef.current = false;
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
       }
@@ -106,15 +171,16 @@ export function useDeviceSocket() {
         current.close();
       }
     };
-  }, [wsUrl, reconnectTick]);
+  }, [wsUrl, pin, reconnectTick]);
 
   const sendImagePayload = useCallback(
     (targetId: string, imageBase64: string): { ok: boolean; error?: string } => {
       const ws = socketRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (!ws || ws.readyState !== WebSocket.OPEN || !isAuthenticatedRef.current) {
         return {
           ok: false,
-          error: 'Not connected to desktop. Tap Pair to check the WebSocket URL.',
+          error:
+            'Not paired with desktop. Tap Pair to enter the WebSocket URL and 6-digit PIN.',
         };
       }
       ws.send(
@@ -130,7 +196,10 @@ export function useDeviceSocket() {
 
   return {
     wsUrl,
+    pin,
+    authError,
     setWsUrl,
+    updatePairing,
     status,
     isConnected: status === 'connected',
     sendImagePayload,

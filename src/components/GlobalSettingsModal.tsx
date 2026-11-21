@@ -27,6 +27,7 @@ export interface GlobalSettingsModalProps {
 
 function GlobalSettingsDialogContent({ onClose }: { onClose: () => void }) {
   const setModelConfig = useCanvasStore((state) => state.setModelConfig);
+  const setShodanApiKey = useCanvasStore((state) => state.setShodanApiKey);
 
   const initialGlobal = readGlobalSettings();
   const [selectedProvider, setSelectedProvider] = useState<LlmProviderId>(
@@ -35,7 +36,11 @@ function GlobalSettingsDialogContent({ onClose }: { onClose: () => void }) {
   const [draftConfigs, setDraftConfigs] = useState<
     Record<LlmProviderId, ProviderConfigEntry>
   >(() => initialGlobal.providerConfigs);
+  const [shodanKeyDraft, setShodanKeyDraft] = useState<string>(
+    initialGlobal.shodanApiKey,
+  );
   const [showApiKey, setShowApiKey] = useState(false);
+  const [showShodanKey, setShowShodanKey] = useState(false);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -70,6 +75,7 @@ function GlobalSettingsDialogContent({ onClose }: { onClose: () => void }) {
 
   const handleSave = () => {
     const trimmedKey = currentDraft.apiKey.trim();
+    const trimmedShodanKey = shodanKeyDraft.trim();
     const updatedConfigs: Record<LlmProviderId, ProviderConfigEntry> = {
       ...draftConfigs,
       [selectedProvider]: {
@@ -82,6 +88,7 @@ function GlobalSettingsDialogContent({ onClose }: { onClose: () => void }) {
       provider: selectedProvider,
       apiKey: trimmedKey,
       model: resolvedModel,
+      shodanApiKey: trimmedShodanKey,
       providerConfigs: updatedConfigs,
     });
 
@@ -90,6 +97,7 @@ function GlobalSettingsDialogContent({ onClose }: { onClose: () => void }) {
       apiKey: trimmedKey,
       model: resolvedModel,
     });
+    setShodanApiKey(trimmedShodanKey);
 
     onClose();
   };
@@ -263,6 +271,57 @@ function GlobalSettingsDialogContent({ onClose }: { onClose: () => void }) {
               spellCheck={false}
               className="font-mono-tabular w-full rounded-lg border border-neutral-200 bg-neutral-50/70 px-2.5 py-2 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-400 focus:bg-white focus:outline-none"
             />
+          </div>
+
+          {/* 4. Shodan API Key (OSINT Infrastructure Lookup) */}
+          <div className="border-t border-neutral-100 pt-3">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <label
+                htmlFor="global-shodan-key-input"
+                className="text-xs font-medium text-neutral-700"
+              >
+                Shodan API Key
+              </label>
+              <a
+                href="https://account.shodan.io/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-[#ff4d4d] transition-colors hover:text-red-700 focus-visible:outline-none focus-visible:underline"
+              >
+                <span>Get Shodan Key</span>
+                <ExternalLink className="h-3 w-3" aria-hidden="true" />
+              </a>
+            </div>
+            <div className="relative flex items-center">
+              <KeyRound className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-neutral-400" />
+              <input
+                id="global-shodan-key-input"
+                data-testid="global-shodan-key-input"
+                type={showShodanKey ? 'text' : 'password'}
+                value={shodanKeyDraft}
+                onChange={(e) => setShodanKeyDraft(e.target.value)}
+                placeholder="Enter Shodan API key (SHODAN_API_KEY)..."
+                autoComplete="off"
+                spellCheck={false}
+                className="font-mono-tabular w-full rounded-lg border border-neutral-200 bg-neutral-50/70 pl-8 pr-8 py-2 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-400 focus:bg-white focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setShowShodanKey((prev) => !prev)}
+                aria-label={showShodanKey ? 'Hide Shodan API key' : 'Show Shodan API key'}
+                data-testid="toggle-shodan-key-visibility-btn"
+                className="absolute right-2 rounded p-1 text-neutral-400 transition-colors hover:bg-neutral-100 hover:text-neutral-700 focus-visible:outline-none"
+              >
+                {showShodanKey ? (
+                  <EyeOff className="h-3.5 w-3.5" />
+                ) : (
+                  <Eye className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-neutral-500">
+              Used by ShodanNode for IP &amp; host reconnaissance via local proxy.
+            </p>
           </div>
         </div>
 

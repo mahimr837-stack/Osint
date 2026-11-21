@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +22,14 @@ import {
   parseGeoSpyResponse,
 } from './src/utils/geoSpy';
 import { checkUsername, OSINT_PLATFORMS } from './src/utils/nativeOsint';
+import {
+  buildShodanUpstreamUrl,
+  normalizeShodanResponse,
+} from './src/utils/shodanOsint';
+import {
+  buildWaybackCdxUrl,
+  parseWaybackCdxResponse,
+} from './src/utils/archiveOsint';
 import {
   buildOpenAiDalleRequest,
   DALLE_MODEL_ID,
@@ -53,6 +62,15 @@ interface GeoSpyProxyBody {
   imageBase64?: string;
   mimeType?: string;
   fileName?: string;
+}
+
+interface ShodanProxyBody {
+  query?: string;
+  apiKey?: string;
+}
+
+interface ArchiveProxyBody {
+  url?: string;
 }
 
 const PROVIDER_ENV_KEYS: Record<LlmProviderId, string> = {
@@ -266,13 +284,39 @@ async function executeProviderGeneration(params: {
 
 let isServerStarted = false;
 
+const WS_CLOSE_UNAUTHORIZED = 4001;
+const WS_AUTH_TIMEOUT_MS = 5_000;
+
+function generateSyncPin(): string {
+  return crypto.randomInt(100_000, 1_000_000).toString();
+}
+
+function isValidPinMatch(candidate: string, expected: string): boolean {
+  const a = Buffer.from(candidate, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function isLoopbackAddress(address?: string): boolean {
+  if (!address) return false;
+  return (
+    address === '127.0.0.1' ||
+    address === '::1' ||
+    address === '::ffff:127.0.0.1'
+  );
+}
+
 export async function startServer() {
   if (isServerStarted) return;
   isServerStarted = true;
   const app = express();
+  const host = process.env.HOST?.trim() || '127.0.0.1';
   const port = Number(process.env.PORT) || 3000;
+  const wsPin = generateSyncPin();
   const allowedOrigins = (
-    process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:5173'
+    process.env.CORS_ORIGINS ||
+    'http://127.0.0.1:3000,http://localhost:3000,http://localhost:5173'
   )
     .split(',')
     .map((o) => o.trim())
@@ -292,6 +336,18 @@ export async function startServer() {
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ status: 'ok' });
+  });
+
+  // Loopback-only endpoint so the local desktop canvas can automatically pair with the /sync WebSocket.
+  // Remote LAN clients receive 403 and must manually enter the 6-digit PIN printed in the terminal.
+  app.get('/api/sync/pin', (req: Request, res: Response) => {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.status(403).json({
+        error: 'WebSocket PIN lookup is restricted to localhost. Enter the PIN from the terminal.',
+      });
+      return;
+    }
+    res.json({ pin: wsPin });
   });
 
   // Returns server-side configuration status for all providers without exposing any secret values
@@ -558,6 +614,114 @@ export async function startServer() {
     }
   });
 
+  // Server-side Shodan Host Search / IP Lookup proxy endpoint (bypasses browser CORS)
+  app.post('/api/osint/shodan', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as ShodanProxyBody;
+    const query = typeof body.query === 'string' ? body.query.trim() : '';
+    if (!query) {
+      res.status(400).json({ error: 'query is required.' });
+      return;
+    }
+
+    const shodanKey = resolveEffectiveApiKey(body.apiKey, 'SHODAN_API_KEY');
+    if (!shodanKey) {
+      res.status(403).json({
+        error:
+          'Please set your Shodan API key in the Dashboard Settings (or in the Shodan node).',
+      });
+      return;
+    }
+
+    const { url: upstreamUrl, mode } = buildShodanUpstreamUrl(query, shodanKey);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+      const upstreamRes = await fetch(upstreamUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'Trace-OSINT/1.0',
+        },
+        signal: controller.signal,
+      });
+
+      const payload = (await upstreamRes.json().catch(() => null)) as unknown;
+      if (!upstreamRes.ok) {
+        const message = readApiErrorMessage(payload, upstreamRes.status);
+        res.status(upstreamRes.status).json({ error: message });
+        return;
+      }
+
+      const normalized = normalizeShodanResponse(payload, mode);
+      res.json({
+        query,
+        mode,
+        total: normalized.total,
+        results: normalized.results,
+      });
+    } catch (error) {
+      const isAbort = error instanceof Error && error.name === 'AbortError';
+      const message = isAbort
+        ? 'Shodan API request timed out after 10 seconds.'
+        : error instanceof Error
+          ? error.message
+          : 'Shodan lookup failed on the server.';
+      res.status(isAbort ? 504 : 502).json({ error: message });
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  // Server-side Wayback Machine CDX API proxy endpoint (bypasses browser CORS)
+  app.post('/api/osint/archive', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as ArchiveProxyBody;
+    const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
+    if (!rawUrl || /\s/.test(rawUrl)) {
+      res.status(400).json({ error: 'A valid target url is required.' });
+      return;
+    }
+
+    const cdxUrl = buildWaybackCdxUrl(rawUrl, 20);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12_000);
+
+    try {
+      const upstreamRes = await fetch(cdxUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'Trace-OSINT/1.0',
+        },
+        signal: controller.signal,
+      });
+
+      if (!upstreamRes.ok) {
+        res.status(upstreamRes.status).json({
+          error: `Wayback Machine CDX API returned HTTP ${upstreamRes.status}.`,
+        });
+        return;
+      }
+
+      const payload = (await upstreamRes.json().catch(() => null)) as unknown;
+      const snapshots = parseWaybackCdxResponse(payload);
+      res.json({
+        url: rawUrl,
+        snapshots,
+      });
+    } catch (error) {
+      const isAbort = error instanceof Error && error.name === 'AbortError';
+      const message = isAbort
+        ? 'Wayback Machine CDX lookup timed out after 12 seconds.'
+        : error instanceof Error
+          ? error.message
+          : 'Wayback Machine archive lookup failed.';
+      res.status(isAbort ? 504 : 502).json({ error: message });
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
   // Server-side Target / Suspect Composite Image Generation endpoint (Google Imagen 3 & OpenAI DALL-E 3)
   app.post('/api/image/generate', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as ImageGenerateBody;
@@ -689,16 +853,62 @@ export async function startServer() {
 
   const httpServer = http.createServer(app);
 
-  // Mobile companion sync relay on /sync (coexists cleanly with Vite HMR via noServer upgrade routing)
+  // Mobile companion sync relay on /sync (PIN-authenticated; coexists with Vite HMR via noServer upgrade routing)
   const wss = new WebSocketServer({ noServer: true });
+  const authenticatedClients = new Set<WebSocket>();
 
   wss.on('connection', (ws, req) => {
     const peer = req.socket.remoteAddress;
-    console.log(`[ws] client connected from ${peer} (total: ${wss.clients.size})`);
+    console.log(`[ws] pending client connected from ${peer} (awaiting PIN auth)`);
+
+    const authTimer = setTimeout(() => {
+      if (!authenticatedClients.has(ws) && ws.readyState === WebSocket.OPEN) {
+        console.warn(`[ws] closing unauthenticated client from ${peer} (auth timeout)`);
+        ws.close(WS_CLOSE_UNAUTHORIZED, 'Unauthorized: authentication timeout');
+      }
+    }, WS_AUTH_TIMEOUT_MS);
 
     ws.on('message', (data, isBinary) => {
+      if (!authenticatedClients.has(ws)) {
+        clearTimeout(authTimer);
+        if (isBinary) {
+          console.warn(`[ws] rejected binary pre-auth payload from ${peer}`);
+          ws.close(WS_CLOSE_UNAUTHORIZED, 'Unauthorized: PIN authentication required');
+          return;
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(data.toString('utf8'));
+        } catch {
+          parsed = null;
+        }
+
+        const record =
+          parsed && typeof parsed === 'object'
+            ? (parsed as Record<string, unknown>)
+            : null;
+        const candidatePin =
+          record && record.type === 'auth' && typeof record.pin === 'string'
+            ? record.pin.trim()
+            : '';
+
+        if (!candidatePin || !isValidPinMatch(candidatePin, wsPin)) {
+          console.warn(`[ws] rejected unauthorized client from ${peer} (invalid or missing PIN)`);
+          ws.close(WS_CLOSE_UNAUTHORIZED, 'Unauthorized: invalid or missing PIN');
+          return;
+        }
+
+        authenticatedClients.add(ws);
+        ws.send(JSON.stringify({ type: 'auth_ok' }));
+        console.log(
+          `[ws] client authenticated from ${peer} (authenticated: ${authenticatedClients.size})`,
+        );
+        return;
+      }
+
       let relayed = 0;
-      for (const client of wss.clients) {
+      for (const client of authenticatedClients) {
         if (client !== ws && client.readyState === WebSocket.OPEN) {
           client.send(data, { binary: isBinary });
           relayed++;
@@ -710,13 +920,17 @@ export async function startServer() {
           ? data.reduce((sum, b) => sum + b.length, 0)
           : (data as ArrayBuffer).byteLength;
       console.log(
-        `[ws] relayed ${isBinary ? 'binary' : 'text'} message (${byteLen} bytes) to ${relayed} client(s)`,
+        `[ws] relayed ${isBinary ? 'binary' : 'text'} message (${byteLen} bytes) to ${relayed} authenticated client(s)`,
       );
     });
 
-    ws.on('close', () =>
-      console.log(`[ws] client disconnected (total: ${wss.clients.size})`),
-    );
+    ws.on('close', () => {
+      clearTimeout(authTimer);
+      authenticatedClients.delete(ws);
+      console.log(
+        `[ws] client disconnected (authenticated: ${authenticatedClients.size})`,
+      );
+    });
     ws.on('error', (err) => console.error('[ws] error:', err.message));
   });
 
@@ -766,10 +980,11 @@ export async function startServer() {
     socket.destroy();
   });
 
-  httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`Trace | OSINT Canvas listening on http://0.0.0.0:${port}`);
-    console.log(`Mobile Companion App available at http://localhost:${port}/mobile`);
-    console.log(`WebSocket sync endpoint: ws://localhost:${port}/sync`);
+  httpServer.listen(port, host, () => {
+    console.log(`Trace | OSINT Canvas listening on http://${host}:${port}`);
+    console.log(`Mobile Companion App available at http://${host}:${port}/mobile`);
+    console.log(`WebSocket sync endpoint: ws://${host}:${port}/sync`);
+    console.log(`🔒 WebSocket PIN: ${wsPin}`);
     console.log(`CORS origins: ${allowedOrigins.join(', ')}`);
     console.log(
       `OSINT pivot engine: native fetch (${OSINT_PLATFORMS.length} platforms, ${osintTimeoutMs}ms timeout)`,

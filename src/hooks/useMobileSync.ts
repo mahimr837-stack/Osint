@@ -9,6 +9,7 @@ export interface MobileSyncImagePayload {
 
 export interface UseMobileSyncOptions {
   url?: string;
+  pin?: string;
   enabled?: boolean;
   onImageReceived: (payload: MobileSyncImagePayload) => void;
 }
@@ -16,6 +17,7 @@ export interface UseMobileSyncOptions {
 export interface UseMobileSyncResult {
   status: MobileSyncStatus;
   isConnected: boolean;
+  syncPin: string | null;
 }
 
 function resolveDefaultWsUrl(): string {
@@ -29,7 +31,7 @@ function resolveDefaultWsUrl(): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${protocol}//${window.location.host}/sync`;
   }
-  return 'ws://localhost:3000/sync';
+  return 'ws://127.0.0.1:3000/sync';
 }
 
 const DEFAULT_WS_URL = resolveDefaultWsUrl();
@@ -67,17 +69,34 @@ export function parseMobileSyncMessage(
   };
 }
 
+async function fetchLocalSyncPin(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/sync/pin');
+    if (!res.ok) return null;
+    const data = (await res.json()) as { pin?: unknown };
+    return typeof data.pin === 'string' && data.pin.trim()
+      ? data.pin.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Maintains a WebSocket connection to the local backend `/sync` relay so the
- * mobile companion app can push base64 images straight onto the OSINT canvas.
+ * Maintains a PIN-authenticated WebSocket connection to the local backend `/sync`
+ * relay so the mobile companion app can push base64 images straight onto the OSINT canvas.
  */
 export function useMobileSync({
   url = DEFAULT_WS_URL,
+  pin: explicitPin,
   enabled = true,
   onImageReceived,
 }: UseMobileSyncOptions): UseMobileSyncResult {
   const [status, setStatus] = useState<MobileSyncStatus>(
     enabled ? 'connecting' : 'disconnected',
+  );
+  const [syncPin, setSyncPin] = useState<string | null>(
+    explicitPin?.trim() || null,
   );
   const onImageReceivedRef = useRef(onImageReceived);
 
@@ -100,21 +119,44 @@ export function useMobileSync({
       if (disposed || reconnectTimer !== null) return;
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        connect();
+        void connect();
       }, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_MS);
     };
 
-    const handleRawText = (text: string) => {
+    const handleRawText = (text: string, isCurrentSocket: boolean) => {
+      try {
+        const parsed = JSON.parse(text) as { type?: unknown } | null;
+        if (parsed && typeof parsed === 'object' && parsed.type === 'auth_ok') {
+          if (isCurrentSocket && !disposed) {
+            reconnectDelay = INITIAL_RECONNECT_MS;
+            setStatus('connected');
+          }
+          return;
+        }
+      } catch {
+        // Fall through to image payload parser
+      }
+
       const payload = parseMobileSyncMessage(text);
       if (payload && !disposed) {
         onImageReceivedRef.current(payload);
       }
     };
 
-    const connect = () => {
+    const connect = async () => {
       if (disposed) return;
       setStatus('connecting');
+
+      const activePin = explicitPin?.trim() || (await fetchLocalSyncPin());
+      if (disposed) return;
+
+      setSyncPin(activePin);
+      if (!activePin) {
+        setStatus('disconnected');
+        scheduleReconnect();
+        return;
+      }
 
       let ws: WebSocket;
       try {
@@ -129,16 +171,18 @@ export function useMobileSync({
 
       ws.addEventListener('open', () => {
         if (disposed || socket !== ws) return;
-        reconnectDelay = INITIAL_RECONNECT_MS;
-        setStatus('connected');
+        ws.send(JSON.stringify({ type: 'auth', pin: activePin }));
       });
 
       ws.addEventListener('message', (event) => {
         if (disposed || socket !== ws) return;
         if (typeof event.data === 'string') {
-          handleRawText(event.data);
+          handleRawText(event.data, socket === ws);
         } else if (event.data instanceof Blob) {
-          void event.data.text().then(handleRawText).catch(() => {});
+          void event.data
+            .text()
+            .then((txt) => handleRawText(txt, socket === ws))
+            .catch(() => {});
         }
       });
 
@@ -154,7 +198,7 @@ export function useMobileSync({
       });
     };
 
-    connect();
+    void connect();
 
     return () => {
       disposed = true;
@@ -168,10 +212,11 @@ export function useMobileSync({
         closing.close();
       }
     };
-  }, [url, enabled]);
+  }, [url, explicitPin, enabled]);
 
   return {
     status,
     isConnected: status === 'connected',
+    syncPin,
   };
 }

@@ -73,9 +73,95 @@ const bad = await fetch(`${BASE}/api/osint/pivot`, {
 });
 check('POST /api/osint/pivot rejects unsafe username', bad.status === 400, `HTTP ${bad.status}`);
 
-// 4. WebSocket broadcast relay on /sync (sender -> receiver, text + binary, no self-echo)
+// 3b. Shodan Proxy validation (missing query -> 400, missing API key -> 403)
+const shodanNoQuery = await fetch(`${BASE}/api/osint/shodan`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ query: '' }),
+});
+check('POST /api/osint/shodan rejects empty query', shodanNoQuery.status === 400, `HTTP ${shodanNoQuery.status}`);
+
+const shodanNoKey = await fetch(`${BASE}/api/osint/shodan`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ query: '8.8.8.8' }),
+});
+check('POST /api/osint/shodan requires API key', shodanNoKey.status === 403, `HTTP ${shodanNoKey.status}`);
+
+// 3c. Wayback Archive Proxy (validation + live CDX query for example.com)
+const archiveBad = await fetch(`${BASE}/api/osint/archive`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ url: '' }),
+});
+check('POST /api/osint/archive rejects empty url', archiveBad.status === 400, `HTTP ${archiveBad.status}`);
+
+const archiveLive = await fetch(`${BASE}/api/osint/archive`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ url: 'example.com' }),
+}).then(async (r) => [r.status, await r.json()]);
+check(
+  'POST /api/osint/archive (example.com)',
+  archiveLive[0] === 200 &&
+    Array.isArray(archiveLive[1]?.snapshots) &&
+    archiveLive[1].snapshots.length > 0 &&
+    archiveLive[1].snapshots[0].snapshotUrl.startsWith('https://web.archive.org/web/'),
+  `HTTP ${archiveLive[0]}, snapshots=${archiveLive[1]?.snapshots?.length ?? 0}`,
+);
+
+// 4. WebSocket PIN Authentication (GET /api/sync/pin, 4001 on wrong/missing PIN, relay when authenticated)
+const pinRes = await fetch(`${BASE}/api/sync/pin`).then(async (r) => [r.status, await r.json()]);
+const validPin = typeof pinRes[1]?.pin === 'string' ? pinRes[1].pin : '';
+check(
+  'GET /api/sync/pin (loopback 6-digit PIN)',
+  pinRes[0] === 200 && /^\d{6}$/.test(validPin),
+  `PIN=${validPin || 'none'}`,
+);
+
+const wsUrl = BASE.replace(/^http/, 'ws') + '/sync';
+const wrongPin = validPin === '000000' ? '111111' : '000000';
+
+// 4a. Wrong PIN must be closed immediately with code 4001
 await new Promise((resolve) => {
-  const wsUrl = BASE.replace(/^http/, 'ws') + '/sync';
+  const ws = new WebSocket(wsUrl);
+  const timer = setTimeout(() => {
+    check('WebSocket wrong PIN closed with 4001', false, 'timeout');
+    ws.terminate();
+    resolve();
+  }, 4000);
+  ws.on('open', () => {
+    ws.send(JSON.stringify({ type: 'auth', pin: wrongPin }));
+  });
+  ws.on('close', (code) => {
+    clearTimeout(timer);
+    check('WebSocket wrong PIN closed with 4001', code === 4001, `code=${code}`);
+    resolve();
+  });
+  ws.on('error', () => {});
+});
+
+// 4b. Unauthenticated payload (missing auth handshake) must be closed immediately with code 4001
+await new Promise((resolve) => {
+  const ws = new WebSocket(wsUrl);
+  const timer = setTimeout(() => {
+    check('WebSocket missing auth closed with 4001', false, 'timeout');
+    ws.terminate();
+    resolve();
+  }, 4000);
+  ws.on('open', () => {
+    ws.send(JSON.stringify({ target_id: 'new', image_base64: 'data:image/png;base64,AAA=' }));
+  });
+  ws.on('close', (code) => {
+    clearTimeout(timer);
+    check('WebSocket missing auth closed with 4001', code === 4001, `code=${code}`);
+    resolve();
+  });
+  ws.on('error', () => {});
+});
+
+// 4c. Authenticated broadcast relay on /sync (sender -> receiver, text + binary, no self-echo)
+await new Promise((resolve) => {
   const receiver = new WebSocket(wsUrl);
   const sender = new WebSocket(wsUrl);
   const textPayload = JSON.stringify({
@@ -85,7 +171,7 @@ await new Promise((resolve) => {
   const binary = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
   const received = [];
   let senderEchoed = false;
-  let openCount = 0;
+  let authOkCount = 0;
 
   const done = () => {
     clearTimeout(timer);
@@ -95,36 +181,56 @@ await new Promise((resolve) => {
   };
 
   const timer = setTimeout(() => {
-    check('WebSocket /sync relay', false, 'timeout');
+    check('WebSocket /sync authenticated relay', false, 'timeout');
     receiver.terminate();
     sender.terminate();
     resolve();
   }, 5000);
 
-  const onOpen = () => {
-    openCount++;
-    if (openCount === 2) {
+  const authPayload = JSON.stringify({ type: 'auth', pin: validPin });
+  sender.on('open', () => sender.send(authPayload));
+  receiver.on('open', () => receiver.send(authPayload));
+
+  const onAuthOk = () => {
+    authOkCount++;
+    if (authOkCount === 2) {
       sender.send(textPayload);
       sender.send(binary);
     }
   };
 
-  sender.on('open', onOpen);
-  receiver.on('open', onOpen);
-  sender.on('message', () => {
+  sender.on('message', (data, isBinary) => {
+    if (!isBinary) {
+      try {
+        const parsed = JSON.parse(data.toString());
+        if (parsed?.type === 'auth_ok') {
+          onAuthOk();
+          return;
+        }
+      } catch {}
+    }
     senderEchoed = true;
   });
 
   receiver.on('message', (data, isBinary) => {
+    if (!isBinary) {
+      try {
+        const parsed = JSON.parse(data.toString());
+        if (parsed?.type === 'auth_ok') {
+          onAuthOk();
+          return;
+        }
+      } catch {}
+    }
     received.push({ data, isBinary });
     if (received.length === 2) {
       setTimeout(() => {
         check(
-          'WebSocket text relay',
+          'WebSocket authenticated text relay',
           !received[0].isBinary && received[0].data.toString() === textPayload,
         );
         check(
-          'WebSocket binary relay',
+          'WebSocket authenticated binary relay',
           received[1].isBinary && Buffer.compare(received[1].data, binary) === 0,
           `${received[1].data.length} bytes`,
         );

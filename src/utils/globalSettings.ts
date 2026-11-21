@@ -8,9 +8,12 @@ export const GLOBAL_SETTINGS_STORAGE_KEY = 'traceboard_global_settings';
 export const GLOBAL_PROVIDER_STORAGE_KEY = 'traceboard_provider';
 export const GLOBAL_API_KEY_STORAGE_KEY = 'traceboard_api_key';
 export const GLOBAL_MODEL_STORAGE_KEY = 'traceboard_model';
+export const GLOBAL_SHODAN_KEY_STORAGE_KEY = 'traceboard_shodan_api_key';
 
 export const MISSING_API_KEY_MESSAGE =
   'Please set your API key in the Dashboard Settings.';
+export const MISSING_SHODAN_KEY_MESSAGE =
+  'Please set your Shodan API key in the Dashboard Settings (or in this node).';
 
 export interface ProviderConfigEntry {
   apiKey: string;
@@ -21,6 +24,7 @@ export interface GlobalSettingsState {
   provider: LlmProviderId;
   apiKey: string;
   model: string;
+  shodanApiKey: string;
   providerConfigs: Record<LlmProviderId, ProviderConfigEntry>;
 }
 
@@ -56,7 +60,7 @@ function getSafeLocalStorage(): Storage | null {
 }
 
 /**
- * Reads the global AI provider, model, and API key configuration from localStorage.
+ * Reads the global AI provider, model, API key, and Shodan API key configuration from localStorage.
  */
 export function readGlobalSettings(): GlobalSettingsState {
   const defaultProvider: LlmProviderId = 'google';
@@ -69,6 +73,7 @@ export function readGlobalSettings(): GlobalSettingsState {
       provider: defaultProvider,
       apiKey: '',
       model: defaultMeta.defaultModel,
+      shodanApiKey: '',
       providerConfigs,
     };
   }
@@ -76,6 +81,7 @@ export function readGlobalSettings(): GlobalSettingsState {
   let activeProvider: LlmProviderId = defaultProvider;
   let activeApiKey = '';
   let activeModel = defaultMeta.defaultModel;
+  let shodanApiKey = '';
 
   try {
     const rawJson = storage.getItem(GLOBAL_SETTINGS_STORAGE_KEY);
@@ -84,6 +90,9 @@ export function readGlobalSettings(): GlobalSettingsState {
       if (parsed && typeof parsed === 'object') {
         if (isValidProviderId(parsed.provider)) {
           activeProvider = parsed.provider;
+        }
+        if (typeof parsed.shodanApiKey === 'string') {
+          shodanApiKey = parsed.shodanApiKey.trim();
         }
         if (
           parsed.providerConfigs &&
@@ -146,6 +155,10 @@ export function readGlobalSettings(): GlobalSettingsState {
         model: activeModel,
       };
     }
+    const directShodanKey = storage.getItem(GLOBAL_SHODAN_KEY_STORAGE_KEY);
+    if (typeof directShodanKey === 'string' && directShodanKey.trim() && !shodanApiKey) {
+      shodanApiKey = directShodanKey.trim();
+    }
   } catch {
     // Fallback to defaults if JSON in localStorage is corrupted
   }
@@ -154,17 +167,19 @@ export function readGlobalSettings(): GlobalSettingsState {
     provider: activeProvider,
     apiKey: activeApiKey,
     model: activeModel,
+    shodanApiKey,
     providerConfigs,
   };
 }
 
 /**
- * Saves the selected AI provider, API key, and model globally to localStorage.
+ * Saves the selected AI provider, API key, model, and optional Shodan API key globally to localStorage.
  */
 export function saveGlobalSettings(input: {
   provider: LlmProviderId;
   apiKey: string;
   model?: string;
+  shodanApiKey?: string;
   providerConfigs?: Partial<Record<LlmProviderId, ProviderConfigEntry>>;
 }): GlobalSettingsState {
   const current = readGlobalSettings();
@@ -177,6 +192,10 @@ export function saveGlobalSettings(input: {
     typeof input.model === 'string' && input.model.trim()
       ? input.model.trim()
       : current.providerConfigs[provider]?.model || meta.defaultModel;
+  const shodanApiKey =
+    typeof input.shodanApiKey === 'string'
+      ? input.shodanApiKey.trim()
+      : current.shodanApiKey;
 
   const nextProviderConfigs: Record<LlmProviderId, ProviderConfigEntry> = {
     ...current.providerConfigs,
@@ -191,6 +210,7 @@ export function saveGlobalSettings(input: {
     provider,
     apiKey,
     model,
+    shodanApiKey,
     providerConfigs: nextProviderConfigs,
   };
 
@@ -201,6 +221,7 @@ export function saveGlobalSettings(input: {
       storage.setItem(GLOBAL_PROVIDER_STORAGE_KEY, provider);
       storage.setItem(GLOBAL_API_KEY_STORAGE_KEY, apiKey);
       storage.setItem(GLOBAL_MODEL_STORAGE_KEY, model);
+      storage.setItem(GLOBAL_SHODAN_KEY_STORAGE_KEY, shodanApiKey);
     } catch {
       // Ignore quota errors
     }
@@ -221,4 +242,25 @@ export function getGlobalApiKey(provider?: LlmProviderId): string {
     return settings.apiKey.trim();
   }
   return '';
+}
+
+/**
+ * Pulls the Shodan API key from localStorage globally.
+ */
+export function getGlobalShodanApiKey(): string {
+  return readGlobalSettings().shodanApiKey.trim();
+}
+
+/**
+ * Persists only the Shodan API key globally to localStorage without altering LLM provider settings.
+ */
+export function saveGlobalShodanApiKey(shodanApiKey: string): GlobalSettingsState {
+  const current = readGlobalSettings();
+  return saveGlobalSettings({
+    provider: current.provider,
+    apiKey: current.apiKey,
+    model: current.model,
+    shodanApiKey: shodanApiKey.trim(),
+    providerConfigs: current.providerConfigs,
+  });
 }

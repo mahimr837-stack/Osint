@@ -54,16 +54,20 @@ Start the production server:
 trace
 ```
 
-By default, Trace binds to `http://0.0.0.0:3000`:
-- **Desktop OSINT Canvas**: [http://localhost:3000](http://localhost:3000)
-- **Mobile Companion App**: [http://localhost:3000/mobile](http://localhost:3000/mobile) (or `http://<YOUR_LAN_IP>:3000/mobile` from a phone on the same Wi-Fi network)
-- **WebSocket Sync Relay**: `ws://localhost:3000/sync`
+By default, Trace binds strictly to localhost (`http://127.0.0.1:3000`) and prints a fresh **6-digit WebSocket PIN** (`🔒 WebSocket PIN: 123456`) on startup:
+- **Desktop OSINT Canvas**: [http://127.0.0.1:3000](http://127.0.0.1:3000)
+- **Mobile Companion App**: [http://127.0.0.1:3000/mobile](http://127.0.0.1:3000/mobile)
+- **WebSocket Sync Relay**: `ws://127.0.0.1:3000/sync` (requires `{ "type": "auth", "pin": "<6-digit PIN>" }`)
 
-To run on a custom port:
+To connect your phone over a **trusted private Wi-Fi network** (or use a custom port):
 
 ```bash
-PORT=8080 trace
+HOST=0.0.0.0 trace
+# Or with a custom port:
+HOST=0.0.0.0 PORT=8080 trace
 ```
+
+Then open `http://<YOUR_LAN_IP>:3000/mobile` on your phone, tap **Pair**, and enter the 6-digit PIN printed in your terminal.
 
 ---
 
@@ -100,7 +104,7 @@ PORT=8080 trace
 
 Trace uses a **Bring Your Own Key (BYOK)** architecture so you control your own AI provider credentials and usage:
 
-1. Open the **Trace Dashboard** at [http://localhost:3000](http://localhost:3000).
+1. Open the **Trace Dashboard** at [http://127.0.0.1:3000](http://127.0.0.1:3000).
 2. Click the **Settings (gear icon)** in the top-right navigation bar next to **New Project**.
 3. Select your preferred **AI Provider**:
    - **Google** (`GEMINI_API_KEY` — Gemini 2.5 / 3.1 / 4 & Imagen 3)
@@ -116,7 +120,7 @@ Your provider selection and API key are stored locally in your browser's `localS
 
 ### Optional Server Environment Variables (`.env`)
 
-You can also copy `.env.example` to `.env` to provide server-level fallback keys or configure CORS and timeouts:
+You can also copy `.env.example` to `.env` to provide server-level fallback keys or configure host binding, CORS, and timeouts:
 
 ```dotenv
 GEMINI_API_KEY=
@@ -126,8 +130,9 @@ ANTHROPIC_API_KEY=
 OPENROUTER_API_KEY=
 DEEPSEEK_API_KEY=
 MISTRAL_API_KEY=
+HOST=127.0.0.1
 PORT=3000
-CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+CORS_ORIGINS=http://127.0.0.1:3000,http://localhost:3000,http://localhost:5173
 OSINT_TIMEOUT_MS=5000
 ```
 
@@ -141,6 +146,14 @@ Run the unit test suite and the live server smoke test:
 # Run unit tests (97 tests across graph, forensics, dorks, pivot, and global settings)
 pnpm exec tsx --test src/utils/*.test.ts
 
-# Run end-to-end HTTP + WebSocket + Native OSINT smoke test against port 3000
+# Run end-to-end HTTP + PIN-authenticated WebSocket + Native OSINT smoke test against port 3000
 node scripts/smoke-test.js
 ```
+
+---
+
+## Limitations & Disclaimers
+
+- **Error Level Analysis (ELA) Is a Heuristic, Not Proof**: The Forensics Node's ELA overlay compares JPEG recompression residuals to surface areas with differing compression histories. Re-saving an image, social media platform transcoding, camera sharpening, or high-contrast edges can all produce bright ELA regions without any manipulation. ELA outputs are investigative heuristics only and **must never be treated as definitive proof of tampering or authenticity**.
+- **Suspect Node Generates AI Sketches, Not Forensic Evidence**: The Suspect Node uses generative AI image models (OpenAI DALL-E 3 / Google Imagen 3) to synthesize illustrative composite sketches from analyst text and connected context. Because generative models hallucinate facial features and details, generated composites are strictly for exploratory visualization and **must not be treated as forensic evidence, official facial composites, or reliable identification**.
+- **Local, Personal Use & Network Security**: Trace is designed for local, personal OSINT research and investigation workflows. By default, the server binds exclusively to `127.0.0.1` (localhost) so it is unreachable from other devices on your network. Only bind to all interfaces (`HOST=0.0.0.0 trace`) when operating on a **trusted private network** (such as a home Wi-Fi network for mobile photo sync), and keep your session's 6-digit WebSocket PIN private. Do not expose Trace directly to the public internet without a hardened reverse proxy and authentication layer.
